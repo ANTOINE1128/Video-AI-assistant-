@@ -1,4 +1,3 @@
-
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
@@ -8,13 +7,19 @@ class FVQA_Vimeo_Client {
 
     private function api( $path ) {
         $url = 'https://api.vimeo.com' . $path;
-        $res = wp_remote_get( $url, array(
-            'headers' => array( 'Authorization' => 'Bearer ' . $this->token ),
-            'timeout' => 30,
-        ) );
+        $res = fvqa_http_with_retry( 'GET', $url, array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $this->token,
+                'Accept'        => 'application/vnd.vimeo.*+json;version=3.4',
+            ),
+            'timeout' => 45,
+        ), 3 );
+
         if ( is_wp_error( $res ) ) return $res;
-        $code = wp_remote_retrieve_response_code( $res );
-        if ( $code < 200 || $code >= 300 ) return new WP_Error( 'vimeo_http', 'Vimeo API error: ' . $code . ' ' . wp_remote_retrieve_body( $res ) );
+        $code = (int) wp_remote_retrieve_response_code( $res );
+        if ( $code < 200 || $code >= 300 ) {
+            return new WP_Error('vimeo_http', 'Vimeo API error: ' . $code . ' ' . wp_remote_retrieve_body( $res ), array('status'=>$code));
+        }
         return json_decode( wp_remote_retrieve_body( $res ), true );
     }
 
@@ -29,21 +34,41 @@ class FVQA_Vimeo_Client {
     public function get_en_caption_url( $video_id ) {
         $tracks = $this->fetch_text_tracks( $video_id );
         if ( is_wp_error( $tracks ) ) return $tracks;
-        if ( empty( $tracks['data'] ) ) return null;
+        if ( empty( $tracks['data'] ) || ! is_array( $tracks['data'] ) ) return null;
+
+        $best = null; $bestScore = -1;
         foreach ( $tracks['data'] as $t ) {
-            $lang = strtolower( isset( $t['language'] ) ? $t['language'] : '' );
-            $kind = strtolower( isset( $t['type'] ) ? $t['type'] : '' );
-            if ( ( $kind === 'subtitles' || $kind === 'captions' ) && ( $lang === 'en' || $lang === 'en-us' || $lang === 'en-gb' ) ) {
-                if ( ! empty( $t['link'] ) ) return $t['link'];
-            }
+            $lang  = strtolower( $t['language'] ?? '' );
+            $type  = strtolower( $t['type'] ?? '' );
+            $link  = $t['link'] ?? '';
+            $active = ! empty( $t['active'] );
+            if ( ! $link ) continue;
+
+            $isEnglish = (
+                $lang === 'en' ||
+                $lang === 'en-us' ||
+                $lang === 'en-gb' ||
+                $lang === 'en-x-autogen' ||
+                strpos( $lang, 'en-' ) === 0
+            );
+            if ( ! $isEnglish ) continue;
+
+            $score = 0;
+            if ( $active ) $score += 4;
+            if ( $type === 'captions' ) $score += 2;
+            if ( $lang === 'en' ) $score += 1;
+
+            if ( $score > $bestScore ) { $bestScore = $score; $best = $link; }
         }
-        return null;
+        return $best ?: null;
     }
 
     public function download_url( $url ) {
-        $res = wp_remote_get( $url, array( 'timeout' => 30 ) );
+        $res = fvqa_http_with_retry( 'GET', $url, array( 'timeout' => 60 ), 3 );
         if ( is_wp_error( $res ) ) return $res;
-        if ( wp_remote_retrieve_response_code( $res ) !== 200 ) return new WP_Error( 'http', 'Failed to download resource' );
+        if ( (int) wp_remote_retrieve_response_code( $res ) !== 200 ) {
+            return new WP_Error( 'http', 'Failed to download resource', array( 'status' => 400 ) );
+        }
         return wp_remote_retrieve_body( $res );
     }
 }

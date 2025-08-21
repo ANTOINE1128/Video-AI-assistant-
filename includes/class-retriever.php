@@ -1,84 +1,174 @@
-
 <?php
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 class FVQA_Retriever {
     private $openai_key;
-    public function __construct( $openai_key ) { $this->openai_key = $openai_key; }
+    private $similarity_threshold;
+    private $top_k;
 
-    private function embed_query( $q ) {
-        $res = wp_remote_post( 'https://api.openai.com/v1/embeddings', array(
-            'headers' => array(
-                'Authorization' => 'Bearer ' . $this->openai_key,
-                'Content-Type'  => 'application/json'
-            ),
-            'body' => json_encode( array(
-                'model' => 'text-embedding-3-small',
-                'input' => $q
-            ) ),
-            'timeout' => 30,
-        ) );
-        if ( is_wp_error( $res ) ) return array();
-        $json = json_decode( wp_remote_retrieve_body( $res ), true );
-        return isset( $json['data'][0]['embedding'] ) ? $json['data'][0]['embedding'] : array();
+    public function __construct( $openai_key, $similarity_threshold = 0.60, $top_k = 5 ) {
+        $this->openai_key = $openai_key;
+        $this->similarity_threshold = $similarity_threshold;
+        $this->top_k = $top_k;
     }
 
-    public function retrieve( $video_id, $question, $k = 5 ) {
+    public function answer( $video_id, $question ) {
+        $sec = fvqa_parse_time_reference( $question );
+
+        if ( $sec !== null ) {
+            $hit = $this->retrieve_by_time( $video_id, $sec );
+            if ( $hit ) {
+                return $this->answer_from_chunks( $question, array( $hit ), array( fvqa_format_timestamp( $hit['start_sec'] ) ) );
+            }
+        }
+
+        $chunks = $this->retrieve_semantic( $video_id, $question, $this->top_k, $this->similarity_threshold );
+        if ( empty( $chunks ) ) {
+            return array(
+                'answer'  => "I couldn't find that in this video.",
+                'sources' => array()
+            );
+        }
+
+        $sources = array();
+        foreach ( $chunks as $c ) {
+            $sources[] = fvqa_format_timestamp( (int) $c['start_sec'] );
+        }
+
+        return $this->answer_from_chunks( $question, $chunks, $sources );
+    }
+
+    private function retrieve_by_time( $video_id, $sec, $pad = 10 ) {
         global $wpdb; $tbl = $wpdb->prefix . 'fvqa_chunks';
-        $qemb = $this->embed_query( $question );
-        if ( ! $qemb ) return array();
-        $rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, start_sec, end_sec, text, embedding FROM $tbl WHERE video_id=%s", $video_id ) );
+        $sec = (int) $sec; $pad = (int) $pad;
+
+        // Exact containment
+        $row = $wpdb->get_row(
+            $wpdb->prepare( "SELECT id, start_sec, end_sec, text FROM $tbl WHERE video_id=%s AND start_sec <= %d AND end_sec >= %d ORDER BY ABS((start_sec+end_sec)/2 - %d) ASC LIMIT 1",
+                $video_id, $sec, $sec, $sec
+            ), ARRAY_A
+        );
+        if ( $row ) return $row;
+
+        // Nearest overlap within ±pad
+        $row = $wpdb->get_row(
+            $wpdb->prepare( "SELECT id, start_sec, end_sec, text FROM $tbl WHERE video_id=%s AND start_sec <= %d AND end_sec >= %d ORDER BY ABS((start_sec+end_sec)/2 - %d) ASC LIMIT 1",
+                $video_id, $sec + $pad, $sec - $pad, $sec
+            ), ARRAY_A
+        );
+        if ( $row ) return $row;
+
+        // Nearest neighbor
+        $row = $wpdb->get_row(
+            $wpdb->prepare( "SELECT id, start_sec, end_sec, text FROM $tbl WHERE video_id=%s ORDER BY ABS((start_sec+end_sec)/2 - %d) ASC LIMIT 1",
+                $video_id, $sec
+            ), ARRAY_A
+        );
+        return $row ?: null;
+    }
+
+    private function retrieve_semantic( $video_id, $query, $k = 5, $threshold = 0.60 ) {
+        global $wpdb; $tbl = $wpdb->prefix . 'fvqa_chunks';
+        $rows = $wpdb->get_results(
+            $wpdb->prepare( "SELECT id, start_sec, end_sec, text, embedding FROM $tbl WHERE video_id=%s", $video_id ),
+            ARRAY_A
+        );
+        if ( empty( $rows ) ) return array();
+
+        $qvec = $this->embed_text( $query );
+        if ( empty( $qvec ) ) return array();
+
         $scored = array();
         foreach ( $rows as $r ) {
-            $emb = json_decode( $r->embedding, true ) ?: array();
-            $score = fvqa_cosine( $qemb, $emb );
-            $scored[] = array(
-                'id'        => (int) $r->id,
-                'start_sec' => (int) $r->start_sec,
-                'end_sec'   => (int) $r->end_sec,
-                'text'      => $r->text,
-                'score'     => $score
-            );
+            $emb = json_decode( $r['embedding'], true );
+            if ( empty( $emb ) || ! is_array( $emb ) ) continue;
+            $sim = fvqa_cosine( $qvec, $emb );
+            if ( $sim >= $threshold ) { $r['_score'] = $sim; $scored[] = $r; }
         }
-        usort( $scored, function( $a, $b ) { return $b['score'] <=> $a['score']; } );
-        return array_slice( $scored, 0, $k );
+
+        if ( empty( $scored ) ) {
+            foreach ( $rows as $r ) {
+                $emb = json_decode( $r['embedding'], true );
+                if ( empty( $emb ) || ! is_array( $emb ) ) continue;
+                $sim = fvqa_cosine( $qvec, $emb );
+                $r['_score'] = $sim;
+                $scored[] = $r;
+            }
+        }
+
+        usort( $scored, function($a, $b){
+            if ( $a['_score'] === $b['_score'] ) { return ($a['start_sec'] <=> $b['start_sec']); }
+            return ($a['_score'] > $b['_score']) ? -1 : 1;
+        });
+
+        return array_slice( $scored, 0, max(1, (int)$k) );
     }
 
-    public function answer( $video_id, $question, $topk = 5 ) {
-        $chunks = $this->retrieve( $video_id, $question, $topk );
+    private function answer_from_chunks( $question, $chunks, $sources = array() ) {
         $context = '';
-        $cites = array();
         foreach ( $chunks as $c ) {
-            $context .= "\n[" . fvqa_seconds_to_time( $c['start_sec'] ) . '-' . fvqa_seconds_to_time( $c['end_sec'] ) . "] " . $c['text'];
-            $cites[] = array(
-                'start' => $c['start_sec'],
-                'end'   => $c['end_sec'],
-                'text'  => mb_substr( $c['text'], 0, 140 ) . '…'
-            );
+            $context .= "\n[" . fvqa_format_timestamp( (int) $c['start_sec'] ) . " – " . fvqa_format_timestamp( (int) $c['end_sec'] ) . "] " . $c['text'];
         }
 
-        $prompt = "You are a strict teaching assistant. Answer ONLY using the context from this video's transcript. If the answer is not contained, say: 'I couldn't find that in this video.' Keep it concise. Provide no external facts.\n\nContext:\n" . $context . "\n\nQuestion: " . $question;
+        $prompt = "You are a helpful teaching assistant. Answer ONLY using the transcript excerpts below. "
+                . "If the answer is not clearly present, say you cannot find it in the video.\n\n"
+                . "Transcript excerpts:\n"
+                . $context
+                . "\n\nQuestion: " . $question . "\nAnswer:";
 
-        $res = wp_remote_post( 'https://api.openai.com/v1/chat/completions', array(
+        $resp = $this->openai_chat( $prompt );
+
+        return array(
+            'answer'  => $resp ?: "I couldn't find that in this video.",
+            'sources' => $sources
+        );
+    }
+
+    private function embed_text( $text ) {
+        $res = fvqa_http_with_retry( 'POST', 'https://api.openai.com/v1/embeddings', array(
             'headers' => array(
                 'Authorization' => 'Bearer ' . $this->openai_key,
-                'Content-Type'  => 'application/json'
+                'Content-Type'  => 'application/json',
             ),
-            'body' => json_encode( array(
-                'model' => 'gpt-4o-mini',
-                'messages' => array(
-                    array('role'=>'system','content'=>'You answer only from the provided context. Language: English.'),
-                    array('role'=>'user','content'=>$prompt)
-                ),
-                'temperature' => 0.2
+            'body' => wp_json_encode( array(
+                'model' => 'text-embedding-3-small',
+                'input' => $text
             ) ),
-            'timeout' => 30,
-        ) );
-        if ( is_wp_error( $res ) ) return $res;
-        $code = wp_remote_retrieve_response_code( $res );
-        if ( $code !== 200 ) return new WP_Error( 'openai_chat', 'Answering failed: ' . wp_remote_retrieve_body( $res ) );
+            'timeout' => 60,
+        ), 3 );
+
+        if ( is_wp_error( $res ) ) { fvqa_log($res->get_error_message()); return array(); }
+        if ( (int) wp_remote_retrieve_response_code( $res ) !== 200 ) {
+            fvqa_log('Embeddings error: ' . wp_remote_retrieve_body($res));
+            return array();
+        }
         $json = json_decode( wp_remote_retrieve_body( $res ), true );
-        $answer = isset( $json['choices'][0]['message']['content'] ) ? $json['choices'][0]['message']['content'] : '';
-        return array( 'answer' => $answer, 'citations' => $cites );
+        return $json['data'][0]['embedding'] ?? array();
+    }
+
+    private function openai_chat( $prompt ) {
+        $res = fvqa_http_with_retry( 'POST', 'https://api.openai.com/v1/chat/completions', array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $this->openai_key,
+                'Content-Type'  => 'application/json',
+            ),
+            'body' => wp_json_encode( array(
+                'model'    => 'gpt-4o-mini',
+                'messages' => array(
+                    array('role' => 'system', 'content' => 'You answer strictly from provided transcript. Cite nothing external.'),
+                    array('role' => 'user',   'content' => $prompt),
+                ),
+                'temperature' => 0.2,
+            ) ),
+            'timeout' => 60,
+        ), 3 );
+
+        if ( is_wp_error( $res ) ) { fvqa_log($res->get_error_message()); return ''; }
+        if ( (int) wp_remote_retrieve_response_code( $res ) !== 200 ) {
+            fvqa_log('Chat error: ' . wp_remote_retrieve_body($res));
+            return '';
+        }
+        $json = json_decode( wp_remote_retrieve_body( $res ), true );
+        return $json['choices'][0]['message']['content'] ?? '';
     }
 }

@@ -1,127 +1,106 @@
 <?php
 /**
- * Plugin Name:       Farhat Video Q&A
- * Description:       Per-video Q&A from Vimeo transcripts using RAG. English only. Floating chat bubble on video pages.
- * Version:           0.1.0
- * Author:            Farhat Lectures
+ * Plugin Name: Farhat Video Q&A
+ * Description: Per-video Q&A for Vimeo lectures. Fetches captions (.vtt), indexes chunks, and answers questions (time-aware).
+ * Version: 0.5.0
+ * Author: Farhat-Lectures
  */
 
-if ( ! defined( 'ABSPATH' ) ) { exit; }
+if ( ! defined('ABSPATH') ) { exit; }
 
-// ---- Constants
-define( 'FVQA_VER', '0.1.0' );
-define( 'FVQA_DIR', plugin_dir_path( __FILE__ ) );
-define( 'FVQA_URL', plugin_dir_url( __FILE__ ) );
+define('FVQA_VERSION', '0.5.0');
+define('FVQA_PATH', plugin_dir_path(__FILE__));
+define('FVQA_URL', plugin_dir_url(__FILE__));
 
-// ---- Includes
-require_once FVQA_DIR . 'includes/helpers.php';
-require_once FVQA_DIR . 'includes/class-settings.php';
-require_once FVQA_DIR . 'includes/class-vimeo-client.php';
-require_once FVQA_DIR . 'includes/class-transcriber.php';
-require_once FVQA_DIR . 'includes/class-indexer.php';
-require_once FVQA_DIR . 'includes/class-retriever.php';
-require_once FVQA_DIR . 'includes/class-rest.php';
+// Includes
+require_once __DIR__ . '/includes/helpers.php';
+require_once __DIR__ . '/includes/install.php';
+require_once __DIR__ . '/includes/class-vimeo-client.php';
+require_once __DIR__ . '/includes/class-transcriber.php';
+require_once __DIR__ . '/includes/class-indexer.php';
+require_once __DIR__ . '/includes/class-retriever.php';
+require_once __DIR__ . '/includes/class-rest.php';
+require_once __DIR__ . '/includes/class-frontend.php';
 
-// ---- Activation: create DB tables
-register_activation_hook( __FILE__, function() {
-    global $wpdb;
-    $charset = $wpdb->get_charset_collate();
+register_activation_hook( __FILE__, 'fvqa_install_tables' );
+add_action( 'admin_init', 'fvqa_maybe_install_tables' );
 
-    $tbl1 = $wpdb->prefix . 'fvqa_video_index';
-    $sql1 = "CREATE TABLE IF NOT EXISTS $tbl1 (
-        video_id VARCHAR(64) PRIMARY KEY,
-        title TEXT NULL,
-        duration INT NULL,
-        has_captions TINYINT(1) DEFAULT 0,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    ) $charset;";
+// Admin settings page
+add_action('admin_menu', function(){
+    add_menu_page(
+        'Video Q&A',
+        'Video Q&A',
+        'manage_options',
+        'fvqa-settings',
+        'fvqa_render_settings_page',
+        'dashicons-format-video',
+        58
+    );
+});
 
-    $tbl2 = $wpdb->prefix . 'fvqa_chunks';
-    $sql2 = "CREATE TABLE IF NOT EXISTS $tbl2 (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        video_id VARCHAR(64) NOT NULL,
-        start_sec INT NOT NULL,
-        end_sec INT NOT NULL,
-        text MEDIUMTEXT NOT NULL,
-        embedding MEDIUMTEXT NULL,
-        INDEX(video_id)
-    ) $charset;";
-
-    $tbl3 = $wpdb->prefix . 'fvqa_logs';
-    $sql3 = "CREATE TABLE IF NOT EXISTS $tbl3 (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        video_id VARCHAR(64) NOT NULL,
-        question TEXT NOT NULL,
-        answer MEDIUMTEXT NOT NULL,
-        citations MEDIUMTEXT NULL,
-        tokens_in INT NULL,
-        tokens_out INT NULL,
-        cost DECIMAL(10,4) NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        INDEX(video_id)
-    ) $charset;";
-
-    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-    dbDelta( array( $sql1, $sql2, $sql3 ) );
-} );
-
-// ---- Assets + auto-inject widget on pages containing Vimeo iframe
-add_action( 'wp_enqueue_scripts', function() {
-    wp_register_style( 'fvqa-widget', FVQA_URL . 'assets/css/widget.css', array(), FVQA_VER );
-    wp_register_script( 'fvqa-widget', FVQA_URL . 'assets/js/widget.js', array('jquery'), FVQA_VER, true );
-
-    $settings = fvqa_get_settings();
-    wp_localize_script( 'fvqa-widget', 'FVQA', array(
-        'rest' => array(
-            'url'   => esc_url_raw( rest_url( 'farhat-video-qa/v1' ) ),
-            'nonce' => wp_create_nonce( 'wp_rest' ),
-        ),
-        'ui' => array(
-            'bubbleLabel' => 'Ask this video',
-        ),
-        'opts' => array(
-            'log' => ! empty( $settings['log_enabled'] ) ? 1 : 0,
-        )
-    ) );
-} );
-
-// Append bubble container if Vimeo iframe present
-add_filter( 'the_content', function( $content ) {
-    if ( is_admin() || is_feed() ) return $content;
-
-    if ( strpos( $content, 'player.vimeo.com/video/' ) !== false ) {
-        $video_id = fvqa_extract_vimeo_id_from_html( $content );
-        if ( $video_id ) {
-            wp_enqueue_style( 'fvqa-widget' );
-            wp_enqueue_script( 'fvqa-widget' );
-            $bubble  = '<div class="fvqa-bubble" data-video-id="' . esc_attr( $video_id ) . '">Ask this video</div>';
-            $bubble .= '<div class="fvqa-panel" data-video-id="' . esc_attr( $video_id ) . '">';
-            $bubble .= '<div class="fvqa-header">Q&A for this video</div>';
-            $bubble .= '<div class="fvqa-messages"></div>';
-            $bubble .= '<div class="fvqa-input"><input type="text" placeholder="Type your question…" />';
-            $bubble .= '<button class="fvqa-send">Ask</button></div></div>';
-            return $content . $bubble;
-        }
+function fvqa_render_settings_page(){
+    if ( ! current_user_can('manage_options') ) return;
+    if ( isset($_POST['fvqa_settings_nonce']) && wp_verify_nonce($_POST['fvqa_settings_nonce'], 'fvqa_save_settings') ) {
+        $opt = array(
+            'vimeo_token'     => sanitize_text_field($_POST['vimeo_token'] ?? ''),
+            'openai_key'      => sanitize_text_field($_POST['openai_key'] ?? ''),
+            'log_enabled'     => isset($_POST['log_enabled']) ? 1 : 0,
+            'disable_whisper' => isset($_POST['disable_whisper']) ? 1 : 0,
+            'debug_logs'      => isset($_POST['debug_logs']) ? 1 : 0,
+        );
+        update_option('fvqa_settings', $opt);
+        echo '<div class="updated"><p>Saved.</p></div>';
     }
-    return $content;
-}, 20 );
+    $s = fvqa_get_settings();
+    ?>
+    <div class="wrap">
+      <h1>Farhat Video Q&A — Settings</h1>
+      <form method="post">
+        <?php wp_nonce_field('fvqa_save_settings', 'fvqa_settings_nonce'); ?>
+        <table class="form-table">
+          <tr>
+            <th><label for="vimeo_token">Vimeo API Token</label></th>
+            <td><input type="text" id="vimeo_token" name="vimeo_token" value="<?php echo esc_attr($s['vimeo_token']); ?>" class="regular-text" /></td>
+          </tr>
+          <tr>
+            <th><label for="openai_key">OpenAI API Key</label></th>
+            <td><input type="text" id="openai_key" name="openai_key" value="<?php echo esc_attr($s['openai_key']); ?>" class="regular-text" /></td>
+          </tr>
+          <tr>
+            <th>Logs</th>
+            <td><label><input type="checkbox" name="log_enabled" <?php checked($s['log_enabled']); ?>/> Keep Q&A logs</label></td>
+          </tr>
+          <tr>
+            <th>Disable Whisper Fallback</th>
+            <td><label><input type="checkbox" name="disable_whisper" <?php checked($s['disable_whisper']); ?>/> Only ingest captions / manual transcripts</label></td>
+          </tr>
+          <tr>
+            <th>Debug Logs</th>
+            <td><label><input type="checkbox" name="debug_logs" <?php checked($s['debug_logs']); ?>/> Emit debug to wp-content/debug.log</label></td>
+          </tr>
+        </table>
+        <p><button class="button button-primary">Save Settings</button></p>
+      </form>
+      <hr/>
+      <h2>Shortcode</h2>
+      <p>Use <code>[farhat_video_qa video_id="827640407"]</code> on a lecture page. If video_id is omitted, the plugin will try to detect the first Vimeo ID from the page content.</p>
+    </div>
+    <?php
+}
 
-// Shortcode: [farhat_video_qa id="123456789"]
-add_shortcode( 'farhat_video_qa', function( $atts ) {
-    $a = shortcode_atts( array( 'id' => '' ), $atts );
-    if ( ! $a['id'] ) return '';
-    wp_enqueue_style( 'fvqa-widget' );
-    wp_enqueue_script( 'fvqa-widget' );
-    $html  = '<div class="fvqa-bubble" data-video-id="' . esc_attr( $a['id'] ) . '">Ask this video</div>';
-    $html .= '<div class="fvqa-panel" data-video-id="' . esc_attr( $a['id'] ) . '">';
-    $html .= '<div class="fvqa-header">Q&A for this video</div>';
-    $html .= '<div class="fvqa-messages"></div>';
-    $html .= '<div class="fvqa-input"><input type="text" placeholder="Type your question…" />';
-    $html .= '<button class="fvqa-send">Ask</button></div></div>';
-    return $html;
-} );
-
-// Init REST routes
-add_action( 'rest_api_init', function() {
-    ( new FVQA_REST() )->register_routes();
-} );
+// Health endpoint (simple)
+add_action('rest_api_init', function(){
+    register_rest_route('farhat-video-qa/v1', '/health', array(
+        'methods' => 'GET',
+        'permission_callback' => '__return_true',
+        'callback' => function(){
+            $s = fvqa_get_settings();
+            return array(
+                'ok' => true,
+                'vimeo_key_present' => (bool) $s['vimeo_token'],
+                'openai_key_present'=> (bool) $s['openai_key'],
+                'version' => FVQA_VERSION
+            );
+        }
+    ));
+});
