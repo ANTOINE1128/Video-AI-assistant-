@@ -1,0 +1,11 @@
+
+.fvqa-bubble{position:fixed;right:20px;bottom:24px;background:#1d4ed8;color:#fff;padding:12px 14px;border-radius:999px;cursor:pointer;z-index:9999;box-shadow:0 10px 25px rgba(0,0,0,.15);} 
+.fvqa-panel{position:fixed;right:20px;bottom:80px;width:360px;max-height:60vh;background:#fff;border-radius:14px;box-shadow:0 10px 35px rgba(0,0,0,.18);display:none;flex-direction:column;overflow:hidden;z-index:9999;} 
+.fvqa-header{font-weight:600;padding:10px 12px;border-bottom:1px solid #eee;background:#f8fafc;} 
+.fvqa-messages{padding:10px 12px;height:40vh;overflow-y:auto;font-size:14px;} 
+.fvqa-msg{margin:8px 0;} 
+.fvqa-msg.user{text-align:right;} 
+.fvqa-input{display:flex;gap:6px;padding:10px;border-top:1px solid #eee;background:#fafafa;} 
+.fvqa-input input{flex:1;padding:8px 10px;border:1px solid #ddd;border-radius:8px;} 
+.fvqa-send{padding:8px 12px;border:0;background:#1d4ed8;color:#fff;border-radius:8px;cursor:pointer;}
+.fvqa-cite{font-size:12px;color:#475569;margin-top:6px;}
