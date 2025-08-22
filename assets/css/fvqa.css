@@ -1,0 +1,99 @@
+/* Farhat Lectures – Q&A widget
+   Theme-friendly: uses CSS variables with BuddyBoss/LD fallbacks.
+*/
+:root{
+  --fvqa-radius: 14px;
+  --fvqa-shadow: 0 14px 30px rgba(0,0,0,.16);
+  --fvqa-border: 1px solid rgba(0,0,0,.06);
+
+  /* Try to read theme primary, fallback to Farhat-like blue */
+  --fvqa-primary: var(--bb-primary, var(--bb-color-primary, #0e64d2));
+  --fvqa-text: #111;
+  --fvqa-bg: #fff;
+  --fvqa-muted: #666;
+  --fvqa-bubble-color: #fff;
+  --fvqa-bubble-bg: var(--fvqa-primary);
+}
+
+@media (prefers-color-scheme: dark){
+  :root{
+    --fvqa-bg: #111;
+    --fvqa-text: #f2f2f2;
+    --fvqa-muted: #b8b8b8;
+    --fvqa-border: 1px solid rgba(255,255,255,.08);
+    --fvqa-shadow: 0 16px 34px rgba(0,0,0,.6);
+    --fvqa-bubble-bg: var(--fvqa-primary);
+  }
+}
+
+.fvqa-widget{
+  position:fixed;right:22px;bottom:22px;z-index:9999;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+}
+
+.fvqa-bubble{
+  background:var(--fvqa-bubble-bg);
+  color:var(--fvqa-bubble-color);
+  border:none;border-radius:999px;
+  padding:12px 18px;
+  box-shadow:var(--fvqa-shadow);
+  cursor:pointer;font-weight:600;
+}
+
+.fvqa-panel{
+  position:fixed;right:22px;bottom:86px;width:360px;max-width:calc(100vw - 40px);
+  max-height:70vh;background:var(--fvqa-bg);color:var(--fvqa-text);
+  border-radius:var(--fvqa-radius);box-shadow:var(--fvqa-shadow);
+  display:flex;flex-direction:column;overflow:hidden;border:var(--fvqa-border);
+}
+
+.fvqa-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;border-bottom:var(--fvqa-border);background:rgba(0,0,0,.02);
+}
+
+.fvqa-title{font-weight:700;}
+.fvqa-close{border:none;background:transparent;font-size:22px;line-height:1;color:var(--fvqa-muted);cursor:pointer}
+
+.fvqa-body{flex:1;overflow:auto;padding:12px}
+.fvqa-messages .msg{
+  background:rgba(0,0,0,.03);
+  border:var(--fvqa-border);
+  border-radius:12px;padding:10px 12px;margin:8px 0;
+}
+.fvqa-messages .msg .meta{font-size:12px;color:var(--fvqa-muted);margin-bottom:4px}
+.fvqa-messages .msg .text{white-space:pre-wrap;word-wrap:break-word}
+
+.fvqa-input{display:flex;border-top:var(--fvqa-border)}
+.fvqa-input input{
+  flex:1;border:none;padding:12px;background:transparent;color:inherit;outline:none;
+}
+.fvqa-input button{
+  border:none;background:var(--fvqa-primary);color:#fff;padding:0 16px;cursor:pointer;font-weight:600
+}
+.fvqa-input button.is-busy{opacity:.6;cursor:wait}
+
+/* ====== Thinking / typing animation ====== */
+.msg.thinking{
+  background:linear-gradient(180deg, rgba(0,0,0,.03), rgba(0,0,0,.05));
+  position:relative;
+}
+.msg.thinking .text{
+  display:flex;align-items:center;gap:6px;color:var(--fvqa-muted);
+}
+
+.typing{display:inline-flex;align-items:center;gap:4px}
+.typing span{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--fvqa-muted);
+  display:inline-block;
+  animation: fvqa-bounce 1.2s infinite ease-in-out both;
+}
+.typing span:nth-child(1){ animation-delay: 0s; }
+.typing span:nth-child(2){ animation-delay: .15s; }
+.typing span:nth-child(3){ animation-delay: .3s; }
+
+@keyframes fvqa-bounce{
+  0%, 80%, 100% { transform: scale(0.6); opacity:.6; }
+  40% { transform: scale(1); opacity:1; }
+}

@@ -64,6 +64,13 @@ class FVQA_Vimeo_Client {
     }
 
     public function download_url( $url ) {
+        // Allowlist hostnames for safety (captions + vimeo API redirects)
+        $allowed = array('captions.cloud.vimeo.com','vimeo.com');
+        $p = wp_parse_url( $url );
+        if ( empty($p['host']) || ! in_array( strtolower($p['host']), $allowed, true ) ) {
+            return new WP_Error('forbidden_url','Forbidden host for download.', array('status'=>400));
+        }
+
         $res = fvqa_http_with_retry( 'GET', $url, array( 'timeout' => 60 ), 3 );
         if ( is_wp_error( $res ) ) return $res;
         if ( (int) wp_remote_retrieve_response_code( $res ) !== 200 ) {

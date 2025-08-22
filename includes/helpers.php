@@ -18,11 +18,13 @@ if ( ! function_exists( 'fvqa_http_with_retry' ) ) {
         $method = strtoupper( $method );
         $fn = $method === 'POST' ? 'wp_remote_post' : 'wp_remote_get';
 
+        // Secure defaults
         $defaults = array(
             'timeout'      => 45,
             'redirection'  => 2,
             'sslverify'    => true,
             'decompress'   => true,
+            'reject_unsafe_urls' => true,
             'headers'      => array(
                 'User-Agent' => 'Farhat-Video-QA/0.5 (+WordPress; ' . site_url() . ')'
             ),
@@ -31,7 +33,6 @@ if ( ! function_exists( 'fvqa_http_with_retry' ) ) {
 
         for ( $i = 0; $i <= $retries; $i++ ) {
             $res = call_user_func( $fn, $url, $args );
-
             if ( ! is_wp_error( $res ) ) {
                 $code = (int) wp_remote_retrieve_response_code( $res );
                 if ( $code >= 200 && $code < 300 ) return $res;
@@ -58,6 +59,11 @@ function fvqa_extract_vimeo_id_from_html( $html ) {
     if ( preg_match( '#player\.vimeo\.com/video/(\d+)#', $html, $m ) ) return $m[1];
     if ( preg_match( '#vimeo\.com/(?:channels/[^/]+/|ondemand/[^/]+/|groups/[^/]+/videos/)?(\d+)#', $html, $m ) ) return $m[1];
     return null;
+}
+
+function fvqa_validate_video_id( $id ) {
+    $id = is_string($id) ? trim($id) : '';
+    return preg_match('/^\d{6,}$/', $id) ? $id : null; // digits only, at least 6
 }
 
 function fvqa_seconds_to_time( $sec ) {
@@ -126,30 +132,25 @@ function fvqa_log( $msg ) {
 
 // Time parsing helpers
 function fvqa_parse_time_reference( $text ) {
-    $q = strtolower( trim( $text ) );
+    $q = strtolower( trim( (string)$text ) );
 
-    // HH:MM:SS
     if ( preg_match( '/\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b/', $q, $m ) ) {
         $h = isset($m[1]) && $m[1] !== '' ? (int)$m[1] : 0;
         $m_ = (int)$m[2];
         $s  = (int)$m[3];
         return $h * 3600 + $m_ * 60 + $s;
     }
-    // MM:SS
     if ( preg_match( '/\b(\d{1,2}):(\d{2})\b/', $q, $m ) ) {
         $m_ = (int)$m[1];
         $s  = (int)$m[2];
         return $m_ * 60 + $s;
     }
-    // explicit seconds
     if ( preg_match( '/\b(\d{1,5})\s*(?:sec|secs|s)\b/', $q, $m ) ) {
         return (int)$m[1];
     }
-    // "12m 15s"
     if ( preg_match( '/\b(\d{1,3})\s*(?:m|min|mins|minute|minutes)\s*(\d{1,2})\s*(?:s|sec|secs|second|seconds)\b/', $q, $m ) ) {
         return ( (int)$m[1] ) * 60 + ( (int)$m[2] );
     }
-    // minutes only
     if ( preg_match( '/\b(?:minute|min|mins)\s*(\d{1,3})\b/', $q, $m ) ) {
         return (int)$m[1] * 60;
     }
@@ -159,7 +160,6 @@ function fvqa_parse_time_reference( $text ) {
     if ( preg_match( '/\bat\s*(\d{1,3})\s*(?:min|mins|minute|minutes)\b/', $q, $m ) ) {
         return (int)$m[1] * 60;
     }
-    // bare number with context ("at 735")
     if ( preg_match( '/\b(?:at|around|about|~)\s*(\d{2,5})\b/', $q, $m ) ) {
         $val = (int)$m[1];
         return $val >= 100 ? $val : $val * 60;
