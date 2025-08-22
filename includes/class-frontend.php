@@ -9,9 +9,9 @@ class FVQA_Frontend {
     }
 
     public function register_assets() {
-        // Styles first (theme-friendly)
         wp_register_style('fvqa-styles', FVQA_URL.'assets/css/fvqa.css', array(), FVQA_VERSION);
         wp_register_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', array('jquery'), FVQA_VERSION, true);
+
         $is_logged_in = is_user_logged_in();
         wp_localize_script('fvqa-chat', 'FVQA', array(
             'rest'          => esc_url_raw( rest_url('farhat-video-qa/v1/ask') ),
@@ -94,11 +94,16 @@ class FVQA_Frontend {
         $video_attr = esc_attr( $video_id );
         ob_start(); ?>
         <div class="fvqa-widget" data-video-id="<?php echo $video_attr; ?>" aria-live="polite">
-            <button class="fvqa-bubble" aria-expanded="false" aria-controls="fvqa-panel">Ask about this video</button>
-            <div class="fvqa-panel" id="fvqa-panel" hidden>
+            <button type="button" class="fvqa-bubble" aria-expanded="false" aria-controls="fvqa-panel">Ask about this video</button>
+            <div class="fvqa-panel" id="fvqa-panel" hidden role="dialog" aria-modal="true" aria-label="Farhat Q&A">
                 <div class="fvqa-header">
                     <div class="fvqa-title">Farhat Q&amp;A</div>
-                    <button class="fvqa-close" aria-label="Close Q&amp;A">&times;</button>
+                    <div class="fvqa-actions">
+                        <button type="button" class="fvqa-fullscreen" aria-pressed="false" aria-label="Enter fullscreen" title="Fullscreen">
+                            <span class="fvqa-icon fs-enter" aria-hidden="true"></span>
+                        </button>
+                        <button type="button" class="fvqa-close" aria-label="Close Q&amp;A" title="Close">&times;</button>
+                    </div>
                 </div>
                 <div class="fvqa-body">
                     <div class="fvqa-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
@@ -106,7 +111,7 @@ class FVQA_Frontend {
                 <div class="fvqa-input">
                     <label class="screen-reader-text" for="fvqa-text">Your question</label>
                     <input id="fvqa-text" type="text" autocomplete="off" maxlength="800" placeholder="Ask about this lecture (e.g., what’s at 12:15?)" />
-                    <button class="fvqa-send">Send</button>
+                    <button type="button" class="fvqa-send">Send</button>
                 </div>
             </div>
         </div>
