@@ -14,6 +14,7 @@ define('FVQA_URL', plugin_dir_url(__FILE__));
 
 // Includes
 require_once __DIR__ . '/includes/helpers.php';
+require_once __DIR__ . '/includes/class-admin.php';
 require_once __DIR__ . '/includes/install.php';
 require_once __DIR__ . '/includes/class-vimeo-client.php';
 require_once __DIR__ . '/includes/class-transcriber.php';

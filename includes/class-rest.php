@@ -14,16 +14,7 @@ class FVQA_REST {
         ));
     }
 
-    /**
-     * Security model (balanced for LocalWP/BuddyBoss):
-     * - Accept EITHER a valid WP REST nonce (X-WP-Nonce) OR a valid public nonce (X-FVQA-Nonce),
-     *   regardless of login state. This prevents “logout” behaviours on some stacks when the WP nonce
-     *   isn’t sent (iframes, preview, port differences).
-     * - Soft same-origin check (if Origin/Referer provided and host mismatches → 403).
-     * - Simple per-IP rate limit.
-     */
     public function permission_check( WP_REST_Request $req ) {
-        // Soft origin/referer check (host only, ignore ports)
         $site_host = parse_url( home_url(), PHP_URL_HOST );
         $hdr = $_SERVER['HTTP_ORIGIN'] ?? ($_SERVER['HTTP_REFERER'] ?? '');
         if ( $hdr ) {
@@ -32,23 +23,12 @@ class FVQA_REST {
                 return new WP_Error('forbidden_origin','Forbidden origin.', array('status'=>403));
             }
         }
-
-        // Accept either nonce
         $wp_nonce  = $req->get_header('x-wp-nonce');
         $pub_nonce = $req->get_header('x-fvqa-nonce');
-
         $wp_ok  = $wp_nonce  ? wp_verify_nonce($wp_nonce, 'wp_rest') : false;
         $pub_ok = $pub_nonce ? wp_verify_nonce($pub_nonce, 'fvqa_public') : false;
-
-        if ( $wp_ok || $pub_ok ) {
-            return true;
-        }
-
-        // Last resort: logged-in users with cookies but missing header (rare)
-        if ( is_user_logged_in() ) {
-            return current_user_can('read') ? true : new WP_Error('forbidden','Forbidden.', array('status'=>403));
-        }
-
+        if ( $wp_ok || $pub_ok ) return true;
+        if ( is_user_logged_in() ) { return current_user_can('read') ? true : new WP_Error('forbidden','Forbidden.', array('status'=>403)); }
         return new WP_Error('nonce_required','Missing or invalid nonce.', array('status'=>403));
     }
 
@@ -56,14 +36,12 @@ class FVQA_REST {
         $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
         $key = 'fvqa_rl_' . md5( $ip );
         $window = 60; $limit  = 20;
-
         $data = get_transient( $key );
         if ( ! is_array( $data ) ) { $data = array( 'count' => 0, 'start' => time() ); }
         $now = time();
         if ( $now - $data['start'] > $window ) { $data = array( 'count' => 0, 'start' => $now ); }
         $data['count']++;
         set_transient( $key, $data, $window );
-
         if ( $data['count'] > $limit ) {
             return new WP_Error('rate_limited','Too many requests. Try again shortly.', array('status'=>429));
         }
@@ -94,8 +72,21 @@ class FVQA_REST {
             return new WP_REST_Response( array('error'=>'Plugin not configured. Missing API keys.'), 500 );
         }
 
+        // Instantiate with tunable knobs from Admin
         $indexer   = new FVQA_Indexer( $s['openai_key'] );
-        $retriever = new FVQA_Retriever( $s['openai_key'], 0.60, 5 );
+        $retriever = new FVQA_Retriever(
+            $s['openai_key'],
+            floatval($s['similarity_threshold']),
+            intval($s['max_chunks']),
+            array(
+                'model'        => $s['openai_model'],
+                'temperature'  => floatval($s['temperature']),
+                'top_p'        => floatval($s['top_p']),
+                'max_tokens'   => intval($s['max_tokens']),
+                'system_prompt'=> (string)$s['system_prompt'],
+                'user_prompt'  => (string)$s['user_prompt'],
+            )
+        );
 
         $ok = $indexer->ensure_indexed( $video_id );
         if ( is_wp_error($ok) ) {
@@ -104,7 +95,6 @@ class FVQA_REST {
 
         $out = $retriever->answer( $video_id, $question );
 
-        // Optional logs
         if ( ! empty($s['log_enabled']) ) {
             global $wpdb; $tbl_logs = $wpdb->prefix . 'fvqa_logs';
             $wpdb->insert( $tbl_logs, array(
