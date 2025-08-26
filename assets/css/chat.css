@@ -1,0 +1,48 @@
+/* Farhat Video Q&A – hardened, namespaced styles */
+.fvqa-widget{box-sizing:border-box;position:fixed;right:18px;bottom:80px;width:360px;max-width:94vw;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.15);overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;z-index:999999}
+.fvqa-widget *{box-sizing:inherit}
+.fvqa-inline{position:relative;right:auto;bottom:auto;margin:12px auto}
+.fvqa-hidden{display:none}
+.fvqa-fullscreen-on{position:fixed;inset:0;width:auto;max-width:none;border-radius:0;right:0;bottom:0}
+
+/* Header */
+.fvqa-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#0e1c2f;color:#fff}
+.fvqa-title{font-weight:600}
+.fvqa-header-btns{display:flex;gap:6px}
+.fvqa-header-btns .fvqa-btn{background:transparent;border:0;color:#fff;cursor:pointer;font-size:18px;line-height:1;padding:4px 6px;border-radius:6px}
+.fvqa-header-btns .fvqa-btn:hover{background:rgba(255,255,255,.12)}
+
+/* Body */
+.fvqa-body{display:flex;flex-direction:column;height:420px}
+.fvqa-actions{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px;border-bottom:1px solid rgba(0,0,0,.06);background:#f8fafc}
+.fvqa-action-btn{padding:6px 10px;border-radius:999px;border:1px solid #d6dee8;background:#fff;cursor:pointer;font-size:12px;line-height:1.2}
+.fvqa-action-btn:hover{background:#eef3f8}
+
+.fvqa-messages{flex:1;overflow:auto;padding:10px}
+.fvqa-msg{padding:8px 10px;margin:6px 0;border-radius:10px;max-width:92%}
+.fvqa-user{background:#eef6ff;margin-left:auto}
+.fvqa-assistant{background:#f7f7f9}
+.fvqa-meta{background:#fff;color:#64748b;font-size:12px}
+
+/* Thinking stripe */
+.fvqa-thinking{padding:8px 10px;color:#0e7c66;background:#ecfdf5;border-top:1px solid #def7ed;border-bottom:1px solid #def7ed}
+
+/* Input */
+.fvqa-input{display:flex;gap:8px;border-top:1px solid rgba(0,0,0,.06);padding:8px;background:#fff}
+.fvqa-text{flex:1;resize:vertical;min-height:48px;border:1px solid #d6dee8;border-radius:10px;padding:8px;font:inherit}
+.fvqa-send{background:#0e1c2f;color:#fff;border:0;border-radius:10px;padding:0 14px;cursor:pointer;min-width:72px;height:40px}
+
+/* Launcher bubble */
+.fvqa-bubble{position:fixed;right:18px;bottom:18px;display:none;align-items:center;gap:8px;height:56px;border-radius:999px;padding:0 16px;background:#0e1c2f;color:#fff;border:none;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:1000000}
+.fvqa-bubble.show{display:flex}
+.fvqa-bubble:focus{outline:2px solid #80d0c7;outline-offset:2px}
+.fvqa-bubble-ico{font-size:20px;line-height:1}
+.fvqa-bubble-label{font-weight:600;font-size:14px}
+
+/* Mobile */
+@media (max-width:520px){
+  .fvqa-body{height:70vh}
+  .fvqa-actions{overflow:auto}
+  .fvqa-widget{right:12px;bottom:84px;width:calc(100vw - 24px)}
+  .fvqa-bubble{right:12px;bottom:12px}
+}

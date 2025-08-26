@@ -1,164 +1,181 @@
 (function($){
-/* ========= Small utilities ========= */
-function nowISO(){ return new Date().toISOString(); }
-function appendMsg($box, text, role){
-  var label = (role==='user'?'You':'Tutor');
-  var $m = $('<div class="msg">');
-  $m.append($('<div class="meta">').text(label+' • '+nowISO()));
-  $m.append($('<div class="text">').text(text));
-  $box.append($m);
-  $box.scrollTop($box[0].scrollHeight);
-}
 
-/* ========= Thinking indicator ========= */
-function addThinking($wrap){
-  clearThinking($wrap);
-  var $box = $wrap.find('.fvqa-messages');
-  var $m = $('<div class="msg thinking" aria-live="polite" aria-busy="true">');
-  $m.append($('<div class="meta">').text('Tutor • preparing answer…'));
-  var $text = $('<div class="text">');
-  var $typing = $('<span class="typing" aria-hidden="true"><span></span><span></span><span></span></span>');
-  $text.append('Thinking ').append($typing);
-  $m.append($text);
-  $box.append($m);
-  $box.scrollTop($box[0].scrollHeight);
-  $wrap.find('.fvqa-panel').attr('aria-busy','true');
-  $wrap.data('fvqaThinkingEl', $m);
-}
-function clearThinking($wrap){
-  var $t = $wrap.data('fvqaThinkingEl');
-  if($t && $t.remove){ $t.remove(); }
-  $wrap.removeData('fvqaThinkingEl');
-  $wrap.find('.fvqa-panel').removeAttr('aria-busy');
-}
+  const cfg = window.FVQA_CFG || {};
+  const $doc = $(document);
 
-/* ========= Busy state ========= */
-function setBusy($wrap, busy){
-  var $btn = $wrap.find('.fvqa-send');
-  if(busy){ $btn.prop('disabled', true).addClass('is-busy'); }
-  else { $btn.prop('disabled', false).removeClass('is-busy'); }
-}
-
-/* ========= Panel open/close/fullscreen ========= */
-function openPanel($wrap, open){
-  var $panel = $wrap.find('.fvqa-panel');
-  var $bubble = $wrap.find('.fvqa-bubble');
-  if(open){
-    $panel.removeAttr('hidden');
-    $bubble.attr('aria-expanded','true');
-    setTimeout(function(){ $wrap.find('#fvqa-text').trigger('focus'); }, 0);
-  } else {
-    $panel.attr('hidden',true);
-    $bubble.attr('aria-expanded','false');
-    exitFullscreen($wrap);
-  }
-}
-function toggleFullscreen($wrap){
-  var $panel = $wrap.find('.fvqa-panel');
-  var $btn   = $wrap.find('.fvqa-fullscreen');
-  var isFs = $panel.hasClass('is-fullscreen');
-  if(isFs){
-    $panel.removeClass('is-fullscreen');
-    $btn.attr('aria-pressed','false').attr('aria-label','Enter fullscreen').attr('title','Fullscreen');
-  }else{
-    $panel.addClass('is-fullscreen');
-    $btn.attr('aria-pressed','true').attr('aria-label','Exit fullscreen').attr('title','Exit fullscreen');
-  }
-}
-function exitFullscreen($wrap){
-  var $panel = $wrap.find('.fvqa-panel');
-  var $btn   = $wrap.find('.fvqa-fullscreen');
-  if($panel.hasClass('is-fullscreen')){
-    $panel.removeClass('is-fullscreen');
-    $btn.attr('aria-pressed','false').attr('aria-label','Enter fullscreen').attr('title','Fullscreen');
-  }
-}
-
-/* ========= UI bindings (event delegation) ========= */
-$(document).on('click','.fvqa-bubble',function(e){
-  e.preventDefault(); e.stopPropagation();
-  var $wrap = $(this).closest('.fvqa-widget');
-  var isOpen = !$wrap.find('.fvqa-panel').attr('hidden');
-  openPanel($wrap, !isOpen);
-});
-
-$(document).on('click','.fvqa-close',function(e){
-  e.preventDefault(); e.stopPropagation();
-  var $wrap = $(this).closest('.fvqa-widget');
-  openPanel($wrap,false);
-});
-
-$(document).on('click','.fvqa-fullscreen',function(e){
-  e.preventDefault(); e.stopPropagation();
-  var $wrap = $(this).closest('.fvqa-widget');
-  toggleFullscreen($wrap);
-});
-
-// Close on ESC, exit fullscreen on ESC as well
-$(document).on('keydown',function(e){
-  if(e.key === 'Escape'){
-    var $wrap = $('.fvqa-widget');
-    if(!$wrap.length) return;
-    var $panel = $wrap.find('.fvqa-panel');
-    if($panel.hasClass('is-fullscreen')){
-      exitFullscreen($wrap);
-    } else if(!$panel.attr('hidden')) {
-      openPanel($wrap,false);
+  // Find Vimeo ID on the page (client-side)
+  function detectVideoId(){
+    const dataEl = document.querySelector('[data-vimeo-id]');
+    if (dataEl && /^\d{7,12}$/.test(dataEl.getAttribute('data-vimeo-id'))) {
+      return dataEl.getAttribute('data-vimeo-id');
     }
+    const ifr = document.querySelector('iframe[src*="vimeo.com"]');
+    if (ifr) {
+      const u = ifr.getAttribute('src') || '';
+      const m = u.match(/(?:video\/|vimeo\.com\/)(\d{7,12})/);
+      if (m) return m[1];
+    }
+    const a = document.querySelector('a[href*="vimeo.com"]');
+    if (a) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/vimeo\.com\/(?:manage\/videos\/)?(\d{7,12})/);
+      if (m) return m[1];
+    }
+    const html = document.documentElement.innerHTML;
+    const any = html.match(/vimeo\.com\/(?:video\/)?(\d{7,12})/);
+    if (any) return any[1];
+    return null;
   }
-});
 
-// Prevent clicks inside panel from bubbling to page
-$(document).on('click','.fvqa-panel',function(e){
-  e.stopPropagation();
-});
+  // Extract timestamp → seconds
+  function extractSeconds(s){
+    if(!s) return null;
+    s = (s+'').toLowerCase();
+    const m3 = s.match(/\b(\d{1,2}):(\d{2}):(\d{2})\b/);
+    if (m3) return parseInt(m3[1],10)*3600 + parseInt(m3[2],10)*60 + parseInt(m3[3],10);
+    const m2 = s.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (m2) return parseInt(m2[1],10)*60 + parseInt(m2[2],10);
+    const ms = s.match(/\b(\d{1,5})\s*s(ec|econds)?\b/);
+    if (ms) return parseInt(ms[1],10);
+    return null;
+  }
 
-/* ========= Send handler ========= */
-$(document).on('click','.fvqa-send',function(){
-  var $wrap = $(this).closest('.fvqa-widget');
-  var videoId = ($wrap.data('video-id') || '').toString();
-  var $input = $wrap.find('#fvqa-text');
-  var $box   = $wrap.find('.fvqa-messages');
-  var q = ($input.val() || '').trim();
-  if(!q){ return; }
-  if(q.length > 800){ q = q.slice(0,800); }
+  function widgetRoot(){
+    return $('.fvqa-widget');
+  }
 
-  appendMsg($box,q,'user');
-  $input.val('');
-  setBusy($wrap,true);
-  addThinking($wrap);
+  function ensureBubble(){
+    // Create the launcher bubble once
+    let $bubble = $('.fvqa-bubble');
+    if (!$bubble.length){
+      $bubble = $('<button/>', {
+        'class':'fvqa-bubble',
+        'type':'button',
+        'aria-label':'Open lecture Q&A',
+        'title':'Open Q&A'
+      }).append('<span class="fvqa-bubble-ico" aria-hidden="true">💬</span><span class="fvqa-bubble-label">Q&A</span>');
+      $('body').append($bubble);
+    }
+    return $bubble;
+  }
 
-  var headers = { 'Content-Type': 'application/json' };
-  if(FVQA.wpNonce){ headers['X-WP-Nonce'] = FVQA.wpNonce; }
-  if(FVQA.publicNonce){ headers['X-FVQA-Nonce'] = FVQA.publicNonce; }
+  function syncBubble(){
+    const $root   = widgetRoot();
+    const hidden  = $root.hasClass('fvqa-hidden');
+    const $bubble = ensureBubble();
+    $bubble.toggleClass('show', hidden);
+  }
 
-  $.ajax({
-    method:'POST',
-    url: FVQA.rest,
-    headers: headers,
-    data: JSON.stringify({ video_id: videoId, question: q }),
-    xhrFields: { withCredentials: true },
-    success: function(res){
-      clearThinking($wrap);
-      var ans = res && res.answer ? res.answer : 'No answer.';
-      var src = (res && res.sources && res.sources.length) ? ('\nSources: ' + res.sources.join(' • ')) : '';
-      appendMsg($box, ans + src, 'bot');
-    },
-    error: function(xhr){
-      clearThinking($wrap);
-      var msg = 'Error: ';
-      if(xhr && xhr.responseJSON && xhr.responseJSON.error){
-        msg += xhr.responseJSON.error;
-      } else if (xhr && xhr.responseText) {
-        msg += xhr.responseText;
-      } else if (xhr && xhr.statusText) {
-        msg += xhr.statusText;
+  function addMessage($box, role, text){
+    const row = $('<div/>', {'class':'fvqa-msg fvqa-'+role}).text(text);
+    $box.append(row);
+    $box.scrollTop($box.prop('scrollHeight'));
+  }
+
+  function setThinking($root, on){
+    const $thinking = $root.find('.fvqa-thinking');
+    if (on) $thinking.removeAttr('hidden'); else $thinking.attr('hidden', true);
+  }
+
+  function sendAsk($root, payload){
+    const $msgs = $root.find('.fvqa-messages');
+    setThinking($root, true);
+
+    // Always attach video_id if we can detect it
+    payload.video_id = payload.video_id || detectVideoId();
+
+    return $.ajax({
+      url: cfg.rest.url,
+      method: 'POST',
+      headers: { 'X-WP-Nonce': cfg.rest.nonce },
+      contentType: 'application/json',
+      data: JSON.stringify(payload)
+    }).always(function(){
+      setThinking($root, false);
+    }).done(function(res){
+      if (res && res.answer) {
+        addMessage($msgs, 'assistant', res.answer);
+        if (res.sources && res.sources.length) {
+          addMessage($msgs, 'meta', 'Sources: ' + res.sources.join(' • '));
+        }
       } else {
-        msg += 'Request failed.';
+        addMessage($msgs, 'assistant', 'Sorry, I could not produce an answer.');
       }
-      appendMsg($box, msg, 'bot');
-    },
-    complete: function(){ setBusy($wrap,false); }
+    }).fail(function(xhr){
+      let msg = 'Error';
+      try { msg = (xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : xhr.responseText; } catch(e){}
+      addMessage($msgs, 'assistant', 'Error: ' + msg);
+    });
+  }
+
+  // Send message
+  $doc.on('click', '.fvqa-send', function(e){
+    e.preventDefault();
+    const $root = widgetRoot();
+    const $text = $root.find('.fvqa-text');
+    const q = $text.val().trim();
+    if (!q) return;
+
+    const secs = extractSeconds(q);
+    addMessage($root.find('.fvqa-messages'), 'user', q);
+
+    sendAsk($root, {
+      question: q,
+      time_hint: secs,
+      action_id: null
+    });
+
+    $text.val('');
   });
-});
+
+  // Action buttons
+  $doc.on('click', '.fvqa-action-btn', function(e){
+    e.preventDefault();
+    const $btn  = $(this);
+    const $root = $btn.closest('.fvqa-widget');
+    const $text = $root.find('.fvqa-text');
+    const q = $text.val().trim();
+    const secs = extractSeconds(q);
+
+    const label = $btn.text().trim();
+    addMessage($root.find('.fvqa-messages'), 'user', (q || '(no text)') + '  — ['+label+']');
+
+    sendAsk($root, {
+      question: q,
+      time_hint: secs,
+      action_id: $btn.data('id')
+    });
+
+    $text.val('');
+  });
+
+  // Header: Close → MINIMIZE (not toggle away forever)
+  $doc.on('click', '.fvqa-close', function(){
+    const $root = widgetRoot();
+    $root.addClass('fvqa-hidden');      // hide widget
+    syncBubble();                       // show bubble
+    // return focus to the bubble for accessibility
+    setTimeout(()=>$('.fvqa-bubble').focus(), 0);
+  });
+
+  // Header: Fullscreen toggle
+  $doc.on('click', '.fvqa-fullscreen', function(){
+    $(this).closest('.fvqa-widget').toggleClass('fvqa-fullscreen-on');
+  });
+
+  // Bubble click → restore widget
+  $doc.on('click', '.fvqa-bubble', function(){
+    const $root = widgetRoot();
+    $root.removeClass('fvqa-hidden');
+    syncBubble(); // hide bubble
+    // focus the textarea for quick typing
+    setTimeout(()=>{ $root.find('.fvqa-text').trigger('focus'); }, 0);
+  });
+
+  // Initialize bubble visibility on load
+  $(function(){
+    ensureBubble();
+    syncBubble();
+  });
+
 })(jQuery);

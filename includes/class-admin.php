@@ -32,20 +32,23 @@ class FVQA_Admin {
         add_settings_field('vimeo_token','Vimeo API Token', array($this,'field_text'), 'farhat-video-qa', 'fvqa_keys', array('key'=>'vimeo_token','type'=>'password'));
         add_settings_field('openai_key','OpenAI API Key', array($this,'field_text'), 'farhat-video-qa', 'fvqa_keys', array('key'=>'openai_key','type'=>'password'));
 
-        add_settings_section('fvqa_model', 'Chat Model & Tuning', '__return_false', 'farhat-video-qa');
+        add_settings_section('fvqa_model', 'Chat Model & Tuning (default chat bubble)', '__return_false', 'farhat-video-qa');
         add_settings_field('openai_model','OpenAI Model', array($this,'field_model'), 'farhat-video-qa', 'fvqa_model');
         add_settings_field('temperature','Temperature', array($this,'field_number'), 'farhat-video-qa', 'fvqa_model', array('key'=>'temperature','min'=>0,'max'=>2,'step'=>0.01));
         add_settings_field('top_p','Top-p', array($this,'field_number'), 'farhat-video-qa', 'fvqa_model', array('key'=>'top_p','min'=>0,'max'=>1,'step'=>0.01));
         add_settings_field('max_tokens','Max Tokens', array($this,'field_number'), 'farhat-video-qa', 'fvqa_model', array('key'=>'max_tokens','min'=>1,'max'=>8192,'step'=>1));
 
-        add_settings_section('fvqa_prompts', 'Prompts', '__return_false', 'farhat-video-qa');
+        add_settings_section('fvqa_prompts', 'Chat Prompts (default chat bubble)', '__return_false', 'farhat-video-qa');
         add_settings_field('system_prompt','System Prompt', array($this,'field_textarea'), 'farhat-video-qa', 'fvqa_prompts', array('key'=>'system_prompt','rows'=>5,'placeholder'=>"You are Farhat Lectures' teaching assistant..."));
         add_settings_field('user_prompt','User Prompt Template', array($this,'field_textarea_help'), 'farhat-video-qa', 'fvqa_prompts', array(
             'key'=>'user_prompt',
             'rows'=>8,
-            'placeholder'=>"Question: {question}\n\nRelevant transcript excerpts:\n{sources}\n\nInstructions: ...",
-            'help'=>'Available placeholders: {question}, {sources} (a bulleted list with timestamps).'
+            'placeholder'=>"Question: {question}\n\nRelevant transcript excerpts:\n{sources}",
+            'help'=>'Available placeholders: {question}, {sources}, {timestamp}'
         ));
+
+        add_settings_section('fvqa_actions', 'Video Q&A Actions (buttons shown in the widget)', '__return_false', 'farhat-video-qa');
+        add_settings_field('action_buttons','Buttons', array($this,'field_actions'), 'farhat-video-qa', 'fvqa_actions');
 
         add_settings_section('fvqa_retrieval', 'Retrieval Settings', '__return_false', 'farhat-video-qa');
         add_settings_field('similarity_threshold','Similarity Threshold', array($this,'field_number'), 'farhat-video-qa', 'fvqa_retrieval', array('key'=>'similarity_threshold','min'=>0,'max'=>1,'step'=>0.01));
@@ -60,19 +63,17 @@ class FVQA_Admin {
     public function sanitize( $input ) {
         $s = fvqa_get_settings(); // start from defaults
 
-        // Core fields
-        $s['vimeo_token']   = isset($input['vimeo_token'])   ? trim( (string)$input['vimeo_token'] )   : $s['vimeo_token'];
-        $s['openai_key']    = isset($input['openai_key'])    ? trim( (string)$input['openai_key'] )    : $s['openai_key'];
+        // Core
+        $s['vimeo_token']   = isset($input['vimeo_token'])   ? trim((string)$input['vimeo_token']) : $s['vimeo_token'];
+        $s['openai_key']    = isset($input['openai_key'])    ? trim((string)$input['openai_key'])  : $s['openai_key'];
 
-        // Model + sampling
+        // Chat defaults
         $s['openai_model']  = isset($input['openai_model'])  ? sanitize_text_field($input['openai_model']) : $s['openai_model'];
         $s['temperature']   = isset($input['temperature'])   ? floatval($input['temperature']) : $s['temperature'];
         $s['top_p']         = isset($input['top_p'])         ? floatval($input['top_p'])       : $s['top_p'];
         $s['max_tokens']    = isset($input['max_tokens'])    ? intval($input['max_tokens'])    : $s['max_tokens'];
-
-        // Prompts
-        $s['system_prompt'] = isset($input['system_prompt']) ? wp_kses_post( $input['system_prompt'] ) : $s['system_prompt'];
-        $s['user_prompt']   = isset($input['user_prompt'])   ? wp_kses_post( $input['user_prompt'] )   : $s['user_prompt'];
+        $s['system_prompt'] = isset($input['system_prompt']) ? wp_kses_post($input['system_prompt']) : $s['system_prompt'];
+        $s['user_prompt']   = isset($input['user_prompt'])   ? wp_kses_post($input['user_prompt'])     : $s['user_prompt'];
 
         // Retrieval
         $s['similarity_threshold'] = isset($input['similarity_threshold']) ? floatval($input['similarity_threshold']) : $s['similarity_threshold'];
@@ -83,7 +84,20 @@ class FVQA_Admin {
         $s['debug_logs']      = ! empty( $input['debug_logs'] ) ? 1 : 0;
         $s['disable_whisper'] = ! empty( $input['disable_whisper'] ) ? 1 : 0;
 
-        // Return; clamping happens in fvqa_get_settings()
+        // Action buttons (sanitize)
+        $rows = isset($input['action_buttons']) ? fvqa_sanitize_action_buttons($input['action_buttons']) : array();
+
+        // NEW: ensure every row has a unique id (fixes issue where cloned rows shared the same UUID)
+        $seen = array();
+        foreach ($rows as &$r) {
+            if ( empty($r['id']) || isset($seen[$r['id']]) ) {
+                $r['id'] = wp_generate_uuid4();
+            }
+            $seen[$r['id']] = true;
+        }
+        unset($r);
+        $s['action_buttons'] = $rows;
+
         return $s;
     }
 
@@ -103,20 +117,13 @@ class FVQA_Admin {
     public function field_model(){
         $key = 'openai_model';
         $current = esc_attr($this->val($key));
-        // 👇 Added GPT-5 option
-        $models = array(
-            'gpt-4o-mini' => 'GPT-4o mini (fast/affordable)',
-            'gpt-4o'      => 'GPT-4o',
-            'gpt-4.1-mini'=> 'GPT-4.1 mini',
-            'o3-mini'     => 'o3-mini (reasoning; Responses API)',
-            'gpt-5'       => 'GPT-5', // NEW
-        );
+        $models = fvqa_model_choices();
         echo '<select name="fvqa_settings[openai_model]">';
         foreach($models as $id=>$label){
             printf('<option value="%s" %s>%s</option>', esc_attr($id), selected($current,$id,false), esc_html($label));
         }
         echo '</select>';
-        echo '<p class="description">Note: o3-mini uses the Responses API automatically. Others (including GPT-5) use Chat Completions unless detected otherwise.</p>';
+        echo '<p class="description">This is the default model for the floating chat bubble. Buttons below can override with their own model.</p>';
     }
 
     public function field_number($args){
@@ -133,7 +140,7 @@ class FVQA_Admin {
         $rows= isset($args['rows'])? intval($args['rows']) : 5;
         $ph  = isset($args['placeholder'])? esc_attr($args['placeholder']) : '';
         $val = esc_textarea($this->val($key));
-        printf('<textarea name="fvqa_settings[%s]" rows="%d" class="large-text" placeholder="%s">%s</textarea>', $key, $rows, $ph, $val);
+        printf('<textarea name="fvqa_settings[%s]" rows="%d" class="large-text code" placeholder="%s">%s</textarea>', $key, $rows, $ph, $val);
     }
 
     public function field_textarea_help($args){
@@ -150,6 +157,112 @@ class FVQA_Admin {
         printf('<label><input type="checkbox" name="fvqa_settings[%s]" value="1" %s /> %s</label>', $key, $checked, $label);
     }
 
+    /** Repeater UI for action buttons (Label, Model, System Prompt, User Prompt) */
+    public function field_actions() {
+        $rows = $this->val('action_buttons');
+        if ( ! is_array($rows) ) $rows = array();
+
+        $models = fvqa_model_choices();
+        echo '<p class="description">Buttons appear in the Video Q&A widget. Each button can use its own model and prompts. Available placeholders in User Prompt: <code>{question}</code>, <code>{sources}</code>, <code>{timestamp}</code></p>';
+        echo '<table class="widefat striped fvqa-actions-table"><thead><tr>';
+        echo '<th style="width:180px">Label</th><th style="width:180px">Model</th><th>System Prompt</th><th>User Prompt</th><th style="width:80px">Remove</th>';
+        echo '</tr></thead><tbody id="fvqa-actions-body">';
+
+        foreach ($rows as $i=>$r) {
+            $id    = esc_attr($r['id']);
+            $label = esc_attr($r['label']);
+            $model = esc_attr($r['model']);
+            $sys   = esc_textarea($r['system_prompt']);
+            $usr   = esc_textarea($r['user_prompt']);
+
+            echo '<tr class="fvqa-row">';
+            printf('<td><input type="text" name="fvqa_settings[action_buttons][%1$s][label]" value="%2$s" class="regular-text" />
+                    <input type="hidden" name="fvqa_settings[action_buttons][%1$s][id]" value="%3$s" /></td>',
+                    $i, $label, $id ?: wp_generate_uuid4()
+            );
+
+            echo '<td><select name="fvqa_settings[action_buttons]['.$i.'][model]">';
+            foreach($models as $mid=>$mlbl){
+                printf('<option value="%s" %s>%s</option>', esc_attr($mid), selected($model,$mid,false), esc_html($mlbl));
+            }
+            echo '</select></td>';
+
+            printf('<td><textarea name="fvqa_settings[action_buttons][%1$s][system_prompt]" rows="5" class="large-text code">%2$s</textarea></td>', $i, $sys);
+            printf('<td><textarea name="fvqa_settings[action_buttons][%1$s][user_prompt]" rows="5" class="large-text code">%2$s</textarea></td>', $i, $usr);
+            echo '<td><button type="button" class="button link-delete fvqa-del-row">Delete</button></td>';
+            echo '</tr>';
+        }
+
+        // prototype row (empty id; JS will generate a fresh UUID on add)
+        $proto_id = '{{row}}';
+        echo '<tr class="fvqa-row fvqa-proto" style="display:none">';
+        echo '<td><input type="text" name="fvqa_settings[action_buttons]['.$proto_id.'][label]" value="" class="regular-text" />';
+        echo '<input type="hidden" name="fvqa_settings[action_buttons]['.$proto_id.'][id]" value="" /></td>';
+        echo '<td><select name="fvqa_settings[action_buttons]['.$proto_id.'][model]">';
+        foreach($models as $mid=>$mlbl){
+            printf('<option value="%s">%s</option>', esc_attr($mid), esc_html($mlbl));
+        }
+        echo '</select></td>';
+        echo '<td><textarea name="fvqa_settings[action_buttons]['.$proto_id.'][system_prompt]" rows="5" class="large-text code"></textarea></td>';
+        echo '<td><textarea name="fvqa_settings[action_buttons]['.$proto_id.'][user_prompt]" rows="5" class="large-text code"></textarea></td>';
+        echo '<td><button type="button" class="button link-delete fvqa-del-row">Delete</button></td>';
+        echo '</tr>';
+
+        echo '</tbody></table>';
+        echo '<p><button type="button" class="button button-secondary" id="fvqa-add-action">+ Add Button</button></p>';
+
+        // inline JS for repeater (now assigns unique UUIDs to new rows)
+        ?>
+        <script>
+        (function(){
+            const tbody = document.getElementById('fvqa-actions-body');
+            const addBtn = document.getElementById('fvqa-add-action');
+
+            function nextIndex(){
+                const rows = tbody.querySelectorAll('tr.fvqa-row:not(.fvqa-proto)');
+                return rows.length ? rows.length : 0;
+            }
+            function uuidv4(){
+                if (window.crypto && window.crypto.getRandomValues) {
+                    const buf = new Uint8Array(16);
+                    window.crypto.getRandomValues(buf);
+                    buf[6] = (buf[6] & 0x0f) | 0x40;
+                    buf[8] = (buf[8] & 0x3f) | 0x80;
+                    const hex = Array.from(buf).map(b=>('0'+b.toString(16)).slice(-2)).join('');
+                    return hex.slice(0,8)+'-'+hex.slice(8,12)+'-'+hex.slice(12,16)+'-'+hex.slice(16,20)+'-'+hex.slice(20);
+                }
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){
+                    const r=Math.random()*16|0, v=c==='x'?r:(r&0x3|0x8);
+                    return v.toString(16);
+                });
+            }
+
+            addBtn.addEventListener('click', function(){
+                const proto = document.querySelector('tr.fvqa-proto');
+                const clone = proto.cloneNode(true);
+                clone.style.display = '';
+                clone.classList.remove('fvqa-proto');
+                const i = nextIndex();
+                clone.innerHTML = clone.innerHTML.replaceAll('<?php echo $proto_id; ?>', String(i));
+                tbody.appendChild(clone);
+
+                // assign a fresh UUID to the hidden id field
+                const idInput = clone.querySelector('input[type="hidden"][name*="[id]"]');
+                if (idInput) idInput.value = uuidv4();
+            });
+
+            tbody.addEventListener('click', function(e){
+                if ( e.target && e.target.classList.contains('fvqa-del-row') ) {
+                    e.preventDefault();
+                    const tr = e.target.closest('tr');
+                    if ( tr ) tr.remove();
+                }
+            });
+        })();
+        </script>
+        <?php
+    }
+
     public function render() {
         if ( ! current_user_can('manage_options') ) { return; }
         ?>
@@ -163,7 +276,7 @@ class FVQA_Admin {
                 ?>
             </form>
             <hr/>
-            <p><strong>Template vars:</strong> In the <em>User Prompt Template</em>, you can use <code>{question}</code> and <code>{sources}</code>. The plugin fills those each time a user asks a question.</p>
+            <p><strong>Placeholders:</strong> In button <em>User Prompt</em> you can use <code>{question}</code> (user’s text), <code>{timestamp}</code> (parsed from user text like “12:15”, “725s”), and <code>{sources}</code> (filled by the retriever).</p>
         </div>
         <?php
     }
