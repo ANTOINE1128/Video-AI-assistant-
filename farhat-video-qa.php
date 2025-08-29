@@ -1,107 +1,99 @@
 <?php
 /**
  * Plugin Name: Farhat Video Q&A
- * Description: Per-video Q&A for Vimeo lectures. Fetches captions (.vtt), indexes chunks, and answers questions (time-aware).
- * Version: 0.5.0
- * Author: Farhat-Lectures
+ * Description: Per-video Q&A for Farhat Lectures using Vimeo captions and OpenAI.
+ * Version: 1.9.4
+ * Author: Antoine Makdessy
  */
 
 if ( ! defined('ABSPATH') ) { exit; }
 
-define('FVQA_VERSION', '0.5.0');
 define('FVQA_PATH', plugin_dir_path(__FILE__));
-define('FVQA_URL', plugin_dir_url(__FILE__));
+define('FVQA_URL',  plugin_dir_url(__FILE__));
 
-// Includes
-require_once __DIR__ . '/includes/helpers.php';
-require_once __DIR__ . '/includes/class-admin.php';
-require_once __DIR__ . '/includes/install.php';
-require_once __DIR__ . '/includes/class-vimeo-client.php';
-require_once __DIR__ . '/includes/class-transcriber.php';
-require_once __DIR__ . '/includes/class-indexer.php';
-require_once __DIR__ . '/includes/class-retriever.php';
-require_once __DIR__ . '/includes/class-rest.php';
-require_once __DIR__ . '/includes/class-frontend.php';
+// Core helpers first
+require_once FVQA_PATH.'includes/helpers.php';
 
-register_activation_hook( __FILE__, 'fvqa_install_tables' );
-add_action( 'admin_init', 'fvqa_maybe_install_tables' );
+// Safe includes (avoid fatals if a file is missing)
+foreach ([
+    'includes/class-install.php',
+    'includes/class-admin.php',
+    'includes/class-rest.php',
+    'includes/class-indexer.php',
+    'includes/class-retriever.php',
+    'includes/class-logger.php',
+] as $rel) {
+    $abs = FVQA_PATH.$rel;
+    if ( file_exists($abs) ) require_once $abs;
+}
 
-// Admin settings page
-add_action('admin_menu', function(){
-    add_menu_page(
-        'Video Q&A',
-        'Video Q&A',
-        'manage_options',
-        'fvqa-settings',
-        'fvqa_render_settings_page',
-        'dashicons-format-video',
-        58
-    );
-});
+// Install/repair tables on activation + at runtime
+if ( class_exists('FVQA_Install') ) {
+    register_activation_hook(__FILE__, ['FVQA_Install','install']);
+    add_action('plugins_loaded', ['FVQA_Install','maybe_install']);
+}
 
-function fvqa_render_settings_page(){
-    if ( ! current_user_can('manage_options') ) return;
-    if ( isset($_POST['fvqa_settings_nonce']) && wp_verify_nonce($_POST['fvqa_settings_nonce'], 'fvqa_save_settings') ) {
-        $opt = array(
-            'vimeo_token'     => sanitize_text_field($_POST['vimeo_token'] ?? ''),
-            'openai_key'      => sanitize_text_field($_POST['openai_key'] ?? ''),
-            'log_enabled'     => isset($_POST['log_enabled']) ? 1 : 0,
-            'disable_whisper' => isset($_POST['disable_whisper']) ? 1 : 0,
-            'debug_logs'      => isset($_POST['debug_logs']) ? 1 : 0,
-        );
-        update_option('fvqa_settings', $opt);
-        echo '<div class="updated"><p>Saved.</p></div>';
-    }
-    $s = fvqa_get_settings();
+/**
+ * Only render/enqueue on LearnDash Topic pages (sfwd-topic).
+ * If you also use custom topic pages, extend fvqa_is_topic_page().
+ */
+function fvqa_is_topic_page() {
+    return ( function_exists('is_singular') && is_singular('sfwd-topic') );
+}
+
+/** Enqueue front assets when needed */
+function fvqa_enqueue_front() {
+    if ( ! fvqa_is_topic_page() ) return;
+
+    wp_enqueue_style('fvqa-chat', FVQA_URL.'assets/css/chat.css', [], defined('FVQA_VERSION')? FVQA_VERSION : '1.9.4');
+    wp_enqueue_script('jquery'); // Ensure jQuery is present for our small usage
+    wp_enqueue_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', ['jquery'], defined('FVQA_VERSION')? FVQA_VERSION : '1.9.4', true);
+
+    $rest = [
+        'url'   => esc_url_raw( rest_url('farhat-qa/v1/ask') ),
+        'nonce' => wp_create_nonce('wp_rest'),
+    ];
+    wp_localize_script('fvqa-chat', 'FVQA_CFG', ['rest'=>$rest]);
+}
+add_action('wp_enqueue_scripts', 'fvqa_enqueue_front');
+
+/** Render floating widget in footer on eligible pages */
+function fvqa_render_widget() {
+    if ( ! fvqa_is_topic_page() ) return;
+
+    $opt = fvqa_get_settings();
+    $buttons = is_array($opt['action_buttons']) ? $opt['action_buttons'] : [];
     ?>
-    <div class="wrap">
-      <h1>Farhat Video Q&A — Settings</h1>
-      <form method="post">
-        <?php wp_nonce_field('fvqa_save_settings', 'fvqa_settings_nonce'); ?>
-        <table class="form-table">
-          <tr>
-            <th><label for="vimeo_token">Vimeo API Token</label></th>
-            <td><input type="text" id="vimeo_token" name="vimeo_token" value="<?php echo esc_attr($s['vimeo_token']); ?>" class="regular-text" /></td>
-          </tr>
-          <tr>
-            <th><label for="openai_key">OpenAI API Key</label></th>
-            <td><input type="text" id="openai_key" name="openai_key" value="<?php echo esc_attr($s['openai_key']); ?>" class="regular-text" /></td>
-          </tr>
-          <tr>
-            <th>Logs</th>
-            <td><label><input type="checkbox" name="log_enabled" <?php checked($s['log_enabled']); ?>/> Keep Q&A logs</label></td>
-          </tr>
-          <tr>
-            <th>Disable Whisper Fallback</th>
-            <td><label><input type="checkbox" name="disable_whisper" <?php checked($s['disable_whisper']); ?>/> Only ingest captions / manual transcripts</label></td>
-          </tr>
-          <tr>
-            <th>Debug Logs</th>
-            <td><label><input type="checkbox" name="debug_logs" <?php checked($s['debug_logs']); ?>/> Emit debug to wp-content/debug.log</label></td>
-          </tr>
-        </table>
-        <p><button class="button button-primary">Save Settings</button></p>
-      </form>
-      <hr/>
-      <h2>Shortcode</h2>
-      <p>Use <code>[farhat_video_qa video_id="827640407"]</code> on a lecture page. If video_id is omitted, the plugin will try to detect the first Vimeo ID from the page content.</p>
+    <div class="fvqa-widget" aria-live="polite">
+      <div class="fvqa-header">
+        <div class="fvqa-title">Farhat Q&amp;A</div>
+        <div class="fvqa-header-btns">
+          <button type="button" class="fvqa-btn fvqa-fullscreen" aria-label="Toggle fullscreen">⤢</button>
+          <button type="button" class="fvqa-btn fvqa-close" aria-label="Minimize">×</button>
+        </div>
+      </div>
+
+      <?php if (!empty($buttons)): ?>
+      <div class="fvqa-actions" role="group" aria-label="Quick actions">
+        <?php foreach ($buttons as $row):
+            $label = esc_html($row['label'] ?? '');
+            $id    = esc_attr($row['id'] ?? '');
+            if ($label==='' || $id==='') continue;
+        ?>
+          <button type="button" class="fvqa-action-btn" data-id="<?php echo $id; ?>"><?php echo $label; ?></button>
+        <?php endforeach; ?>
+      </div>
+      <?php endif; ?>
+
+      <div class="fvqa-body">
+        <div class="fvqa-messages" aria-live="polite"></div>
+        <div class="fvqa-thinking" hidden>thinking…</div>
+        <div class="fvqa-input">
+          <textarea class="fvqa-text" placeholder="Ask about this lecture (e.g., “what happens at 12:15?”)"></textarea>
+          <button class="fvqa-send" type="button">Send</button>
+        </div>
+      </div>
     </div>
     <?php
 }
-
-// Health endpoint (simple)
-add_action('rest_api_init', function(){
-    register_rest_route('farhat-video-qa/v1', '/health', array(
-        'methods' => 'GET',
-        'permission_callback' => '__return_true',
-        'callback' => function(){
-            $s = fvqa_get_settings();
-            return array(
-                'ok' => true,
-                'vimeo_key_present' => (bool) $s['vimeo_token'],
-                'openai_key_present'=> (bool) $s['openai_key'],
-                'version' => FVQA_VERSION
-            );
-        }
-    ));
-});
+add_action('wp_footer', 'fvqa_render_widget', 40);

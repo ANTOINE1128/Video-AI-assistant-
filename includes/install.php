@@ -1,50 +1,46 @@
 <?php
 if ( ! defined('ABSPATH') ) { exit; }
 
-function fvqa_install_tables() {
-    global $wpdb;
-    $charset_collate = $wpdb->get_charset_collate();
-    $tbl_chunks = $wpdb->prefix . 'fvqa_chunks';
-    $tbl_logs   = $wpdb->prefix . 'fvqa_logs';
+class FVQA_Install {
+    public static function install(){ self::maybe_install(); }
 
-    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    public static function maybe_install(){
+        global $wpdb;
+        $chunks = $wpdb->prefix.'fvqa_chunks';
+        $logs   = $wpdb->prefix.'fvqa_logs';
 
-    $sql_chunks = "CREATE TABLE $tbl_chunks (
-        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-        video_id VARCHAR(64) NOT NULL,
-        start_sec INT UNSIGNED NOT NULL DEFAULT 0,
-        end_sec   INT UNSIGNED NOT NULL DEFAULT 0,
-        text LONGTEXT NOT NULL,
-        embedding LONGTEXT NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY  (id),
-        KEY video_id (video_id),
-        KEY start_sec (start_sec),
-        KEY end_sec (end_sec)
-    ) $charset_collate;";
-    dbDelta($sql_chunks);
+        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $wpdb->esc_like($chunks)) );
+        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $wpdb->esc_like($logs))   );
 
-    $sql_logs = "CREATE TABLE $tbl_logs (
-        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
-        video_id VARCHAR(64) NOT NULL,
-        question LONGTEXT NOT NULL,
-        answer LONGTEXT NULL,
-        citations LONGTEXT NULL,
-        ip VARCHAR(64) NULL,
-        ua VARCHAR(255) NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (id),
-        KEY video_id (video_id),
-        KEY created_at (created_at)
-    ) $charset_collate;";
-    dbDelta($sql_logs);
-}
+        if ($have_chunks === $chunks && $have_logs === $logs) return;
 
-function fvqa_maybe_install_tables() {
-    global $wpdb;
-    $tbl = $wpdb->prefix . 'fvqa_chunks';
-    $exists = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $tbl) );
-    if ( $exists !== $tbl ) {
-        fvqa_install_tables();
+        require_once ABSPATH.'wp-admin/includes/upgrade.php';
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql1 = "CREATE TABLE $chunks (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            video_id VARCHAR(20) NOT NULL,
+            start_sec INT UNSIGNED NOT NULL,
+            end_sec INT UNSIGNED NOT NULL,
+            text LONGTEXT NOT NULL,
+            embedding LONGTEXT NULL,
+            PRIMARY KEY (id),
+            KEY vid_idx (video_id),
+            KEY time_idx (video_id, start_sec)
+        ) $charset_collate;";
+
+        $sql2 = "CREATE TABLE $logs (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            video_id VARCHAR(20) NOT NULL,
+            user_id BIGINT UNSIGNED NULL,
+            question LONGTEXT NOT NULL,
+            answer LONGTEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY vidlog_idx (video_id, created_at)
+        ) $charset_collate;";
+
+        dbDelta($sql1);
+        dbDelta($sql2);
     }
 }

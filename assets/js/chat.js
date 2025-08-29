@@ -3,31 +3,31 @@
   const cfg = window.FVQA_CFG || {};
   const $doc = $(document);
 
-  // Find Vimeo ID on the page (client-side)
   function detectVideoId(){
     const dataEl = document.querySelector('[data-vimeo-id]');
-    if (dataEl && /^\d{7,12}$/.test(dataEl.getAttribute('data-vimeo-id'))) {
-      return dataEl.getAttribute('data-vimeo-id');
-    }
+    if (dataEl && /^\d{7,12}$/.test(dataEl.getAttribute('data-vimeo-id'))) return dataEl.getAttribute('data-vimeo-id');
+
     const ifr = document.querySelector('iframe[src*="vimeo.com"]');
     if (ifr) {
       const u = ifr.getAttribute('src') || '';
       const m = u.match(/(?:video\/|vimeo\.com\/)(\d{7,12})/);
       if (m) return m[1];
     }
+
     const a = document.querySelector('a[href*="vimeo.com"]');
     if (a) {
       const href = a.getAttribute('href') || '';
       const m = href.match(/vimeo\.com\/(?:manage\/videos\/)?(\d{7,12})/);
       if (m) return m[1];
     }
+
     const html = document.documentElement.innerHTML;
     const any = html.match(/vimeo\.com\/(?:video\/)?(\d{7,12})/);
     if (any) return any[1];
+
     return null;
   }
 
-  // Extract timestamp → seconds
   function extractSeconds(s){
     if(!s) return null;
     s = (s+'').toLowerCase();
@@ -40,30 +40,20 @@
     return null;
   }
 
-  function widgetRoot(){
-    return $('.fvqa-widget');
-  }
+  function widgetRoot(){ return $('.fvqa-widget'); }
 
   function ensureBubble(){
-    // Create the launcher bubble once
     let $bubble = $('.fvqa-bubble');
     if (!$bubble.length){
-      $bubble = $('<button/>', {
-        'class':'fvqa-bubble',
-        'type':'button',
-        'aria-label':'Open lecture Q&A',
-        'title':'Open Q&A'
-      }).append('<span class="fvqa-bubble-ico" aria-hidden="true">💬</span><span class="fvqa-bubble-label">Q&A</span>');
+      $bubble = $('<button/>', {'class':'fvqa-bubble','type':'button','aria-label':'Open lecture Q&A','title':'Open Q&A'})
+        .append('<span class="fvqa-bubble-ico" aria-hidden="true">💬</span><span class="fvqa-bubble-label">Q&A</span>');
       $('body').append($bubble);
     }
     return $bubble;
   }
-
   function syncBubble(){
-    const $root   = widgetRoot();
-    const hidden  = $root.hasClass('fvqa-hidden');
-    const $bubble = ensureBubble();
-    $bubble.toggleClass('show', hidden);
+    const hidden = widgetRoot().hasClass('fvqa-hidden');
+    ensureBubble().toggleClass('show', hidden);
   }
 
   function addMessage($box, role, text){
@@ -80,8 +70,6 @@
   function sendAsk($root, payload){
     const $msgs = $root.find('.fvqa-messages');
     setThinking($root, true);
-
-    // Always attach video_id if we can detect it
     payload.video_id = payload.video_id || detectVideoId();
 
     return $.ajax({
@@ -90,22 +78,21 @@
       headers: { 'X-WP-Nonce': cfg.rest.nonce },
       contentType: 'application/json',
       data: JSON.stringify(payload)
-    }).always(function(){
-      setThinking($root, false);
-    }).done(function(res){
-      if (res && res.answer) {
-        addMessage($msgs, 'assistant', res.answer);
-        if (res.sources && res.sources.length) {
-          addMessage($msgs, 'meta', 'Sources: ' + res.sources.join(' • '));
+    }).always(function(){ setThinking($root, false); })
+      .done(function(res){
+        if (res && res.answer) {
+          addMessage($msgs, 'assistant', res.answer);
+          if (res.sources && res.sources.length) {
+            addMessage($msgs, 'meta', 'Sources: ' + res.sources.join(' • '));
+          }
+        } else {
+          addMessage($msgs, 'assistant', 'Sorry, I could not produce an answer.');
         }
-      } else {
-        addMessage($msgs, 'assistant', 'Sorry, I could not produce an answer.');
-      }
-    }).fail(function(xhr){
-      let msg = 'Error';
-      try { msg = (xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : xhr.responseText; } catch(e){}
-      addMessage($msgs, 'assistant', 'Error: ' + msg);
-    });
+      }).fail(function(xhr){
+        let msg = 'Error';
+        try { msg = (xhr.responseJSON && xhr.responseJSON.message) ? xhr.responseJSON.message : xhr.responseText; } catch(e){}
+        addMessage($msgs, 'assistant', 'Error: ' + msg);
+      });
   }
 
   // Send message
@@ -119,12 +106,7 @@
     const secs = extractSeconds(q);
     addMessage($root.find('.fvqa-messages'), 'user', q);
 
-    sendAsk($root, {
-      question: q,
-      time_hint: secs,
-      action_id: null
-    });
-
+    sendAsk($root, { question: q, time_hint: secs, action_id: null });
     $text.val('');
   });
 
@@ -136,46 +118,36 @@
     const $text = $root.find('.fvqa-text');
     const q = $text.val().trim();
     const secs = extractSeconds(q);
-
     const label = $btn.text().trim();
+
     addMessage($root.find('.fvqa-messages'), 'user', (q || '(no text)') + '  — ['+label+']');
-
-    sendAsk($root, {
-      question: q,
-      time_hint: secs,
-      action_id: $btn.data('id')
-    });
-
+    sendAsk($root, { question: q, time_hint: secs, action_id: $btn.data('id') });
     $text.val('');
   });
 
-  // Header: Close → MINIMIZE (not toggle away forever)
+  // Close → minimize
   $doc.on('click', '.fvqa-close', function(){
     const $root = widgetRoot();
-    $root.addClass('fvqa-hidden');      // hide widget
-    syncBubble();                       // show bubble
-    // return focus to the bubble for accessibility
+    $root.addClass('fvqa-hidden');
+    syncBubble();
     setTimeout(()=>$('.fvqa-bubble').focus(), 0);
   });
 
-  // Header: Fullscreen toggle
+  // Fullscreen toggle
   $doc.on('click', '.fvqa-fullscreen', function(){
     $(this).closest('.fvqa-widget').toggleClass('fvqa-fullscreen-on');
   });
 
-  // Bubble click → restore widget
+  // Bubble click → restore
   $doc.on('click', '.fvqa-bubble', function(){
     const $root = widgetRoot();
     $root.removeClass('fvqa-hidden');
-    syncBubble(); // hide bubble
-    // focus the textarea for quick typing
+    syncBubble();
     setTimeout(()=>{ $root.find('.fvqa-text').trigger('focus'); }, 0);
   });
 
-  // Initialize bubble visibility on load
   $(function(){
-    ensureBubble();
-    syncBubble();
+    ensureBubble(); syncBubble();
   });
 
 })(jQuery);
