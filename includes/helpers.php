@@ -1,147 +1,131 @@
 <?php
 if ( ! defined('ABSPATH') ) { exit; }
 
-/** Version used for cache-busting assets */
-if ( ! defined('FVQA_VERSION') ) define('FVQA_VERSION','1.9.4');
+/** Plugin settings helpers */
+function fvqa_default_settings(){
+    return array(
+        'vimeo_token'         => '',
+        'openai_key'          => '',
+        'openai_model'        => 'gpt-4o-mini',
+        'temperature'         => 0.2,
+        'top_p'               => 1.0,
+        'max_tokens'          => 1200,
+        'system_prompt'       => "You are a helpful teaching assistant.",
+        'user_prompt'         => "Question: {question}\n\nUse only these excerpts:\n{sources}\n\nTimestamp: {timestamp}",
+        'similarity_threshold'=> 0.15,
+        'max_chunks'          => 12,
+        'log_enabled'         => 0,
+        'debug_logs'          => 0,
+        'disable_whisper'     => 0,
+        'action_buttons'      => array(),
+        'tts_voice'           => 'alloy', // for audio notes
+        'tts_model'           => 'gpt-4o-mini-tts'
+    );
+}
 
-/** Options with defaults and clamps */
-function fvqa_get_settings() {
-    $defaults = [
-        'vimeo_token'          => '',
-        'openai_key'           => '',
-        'openai_model'         => 'gpt-4o-mini',
-        'temperature'          => 0.2,
-        'top_p'                => 1.0,
-        'max_tokens'           => 600,
-        'system_prompt'        => "You are Farhat Lectures' teaching assistant. Answer using only the provided transcript excerpts. If unsure, say you don’t know. Be concise and precise.",
-        'user_prompt'          => "Question: {question}\n\nRelevant transcript excerpts:\n{sources}",
-        'similarity_threshold' => 0.60,
-        'max_chunks'           => 5,
-        'log_enabled'          => 1,
-        'debug_logs'           => 0,
-        'disable_whisper'      => 0,
-        'action_buttons'       => [], // label, id, model, system_prompt, user_prompt
-    ];
-    $opt = get_option('fvqa_settings', []);
-    $out = wp_parse_args( is_array($opt)?$opt:[], $defaults );
+function fvqa_get_settings(){
+    $opts = get_option('fvqa_settings', array());
+    if (!is_array($opts)) $opts=array();
+    $def  = fvqa_default_settings();
+    // Merge defaults
+    foreach ($def as $k=>$v){ if (!array_key_exists($k,$opts)) $opts[$k]=$v; }
+    return $opts;
+}
 
-    $out['temperature'] = max(0, min(2, floatval($out['temperature'])));
-    $out['top_p']       = max(0, min(1, floatval($out['top_p'])));
-    $out['max_tokens']  = max(1, intval($out['max_tokens']));
-    $out['similarity_threshold'] = max(0, min(1, floatval($out['similarity_threshold'])));
-    $out['max_chunks']  = max(1, intval($out['max_chunks']));
+/** Simple debug logger */
+function fvqa_log($msg){
+    $o = fvqa_get_settings();
+    if (!empty($o['debug_logs'])){
+        if (is_array($msg) || is_object($msg)) $msg = wp_json_encode($msg);
+        error_log('[FVQA] '.$msg);
+    }
+}
 
-    if ( empty($out['action_buttons']) || ! is_array($out['action_buttons']) ) $out['action_buttons'] = [];
+/** HTTP with one retry and exponential backoff */
+function fvqa_http_with_retry($method, $url, $args=array(), $retries=1){
+    $args = is_array($args)? $args : array();
+    $args['method'] = strtoupper($method);
+    $attempts = 0;
+    $delay = 0.5;
+    while (true){
+        $attempts++;
+        $res = wp_remote_request($url, $args);
+        if (!is_wp_error($res)){
+            $code = wp_remote_retrieve_response_code($res);
+            if ($code<500) return $res;
+        }
+        if ($attempts > max(1,intval($retries))) return $res;
+        usleep( intval($delay*1000000) );
+        $delay *= 2;
+    }
+}
+
+/** Dropdown of model choices for admin */
+function fvqa_model_choices(){
+    return array(
+        'gpt-5'         => 'GPT-5 (Responses API)',
+        'o3-mini'       => 'o3-mini (reasoning)',
+        'gpt-4.1'       => 'gpt-4.1',
+        'gpt-4.1-mini'  => 'gpt-4.1-mini',
+        'gpt-4o'        => 'GPT-4o',
+        'gpt-4o-mini'   => 'GPT-4o mini',
+    );
+}
+
+/** Sanitize action button rows from admin */
+function fvqa_sanitize_action_buttons($rows){
+    if (!is_array($rows)) return array();
+    $out = array();
+    foreach($rows as $r){
+        $out[] = array(
+            'id'            => sanitize_text_field($r['id'] ?? ''),
+            'label'         => sanitize_text_field($r['label'] ?? ''),
+            'model'         => sanitize_text_field($r['model'] ?? 'gpt-4o-mini'),
+            'system_prompt' => wp_kses_post($r['system_prompt'] ?? ''),
+            'user_prompt'   => wp_kses_post($r['user_prompt'] ?? ''),
+            'audio'         => !empty($r['audio']) ? 1 : 0,
+        );
+    }
     return $out;
 }
 
-/** Allowed models for selects */
-function fvqa_model_choices() {
-    return [
-        'gpt-4o-mini'  => 'GPT-4o mini (fast)',
-        'gpt-4o'       => 'GPT-4o',
-        'gpt-4.1-mini' => 'GPT-4.1 mini',
-        'o3-mini'      => 'o3-mini (reasoning)',
-        'gpt-5'        => 'GPT-5',
-    ];
-}
+/**
+ * Text-to-Speech using OpenAI Audio Speech API.
+ * Returns array( 'url' => <public URL or local file path> ) on success or WP_Error.
+ */
+function fvqa_tts_synthesize($api_key, $text, $voice='alloy', $model='gpt-4o-mini-tts'){
+    $api_key = trim((string)$api_key);
+    if ($api_key==='') return new \WP_Error('openai_key','OpenAI key is not set');
 
-/** Cosine similarity for vectors (if you later store embeddings) */
-function fvqa_cosine($a,$b){
-    $dot=0.0;$na=0.0;$nb=0.0;$n=min(count($a),count($b));
-    for($i=0;$i<$n;$i++){ $dot+=$a[$i]*$b[$i]; $na+=$a[$i]*$a[$i]; $nb+=$b[$i]*$b[$i]; }
-    if ($na==0||$nb==0) return 0.0;
-    return $dot/(sqrt($na)*sqrt($nb));
-}
+    $payload = array(
+        'model' => $model,
+        'input' => (string)$text,
+        'voice' => $voice,
+        'format'=> 'mp3',
+    );
 
-/** Seconds → MM:SS */
-function fvqa_format_timestamp($sec){
-    $sec=max(0,intval($sec)); return sprintf('%02d:%02d', floor($sec/60), $sec%60);
-}
+    $res = fvqa_http_with_retry('POST', 'https://api.openai.com/v1/audio/speech', array(
+        'headers' => array(
+            'Authorization' => 'Bearer '.$api_key,
+            'Content-Type'  => 'application/json',
+        ),
+        'timeout' => 60,
+        'body'    => wp_json_encode($payload)
+    ), 1);
 
-/** Parse "12:15", "01:02:03", "725s" → seconds */
-function fvqa_parse_time_hint($text){
-    $t=strtolower(trim((string)$text));
-    if (preg_match('/\b(\d{1,2}):(\d{2}):(\d{2})\b/',$t,$m)) return intval($m[1])*3600+intval($m[2])*60+intval($m[3]);
-    if (preg_match('/\b(\d{1,2}):(\d{2})\b/',$t,$m))       return intval($m[1])*60+intval($m[2]);
-    if (preg_match('/\b(\d{1,5})\s*s(ec|econds)?\b/',$t,$m)) return intval($m[1]);
-    return null;
-}
+    if (is_wp_error($res)) return $res;
+    $code = wp_remote_retrieve_response_code($res);
+    $body = wp_remote_retrieve_body($res);
+    if ($code>=400) return new \WP_Error('openai_tts', 'OpenAI TTS error: '.$code);
 
-/** HTTP with retry; always return wp_remote_response or WP_Error */
-function fvqa_http_with_retry($method,$url,$args=[],$retries=1){
-    $args=is_array($args)?$args:[];
-    $args['method']=$method;
-    $args['timeout']=isset($args['timeout'])?$args['timeout']:30;
-    $resp=wp_remote_request($url,$args);
-    if (!is_wp_error($resp)) return $resp;
-    for($i=0;$i<$retries;$i++){
-        usleep(200000);
-        $resp=wp_remote_request($url,$args);
-        if (!is_wp_error($resp)) break;
-    }
-    return $resp;
-}
+    // Save to uploads
+    $uploads = wp_upload_dir();
+    if (!empty($uploads['error'])) return new \WP_Error('upload_dir', $uploads['error']);
+    $dir = trailingslashit($uploads['basedir']).'fvqa-audio';
+    if (!file_exists($dir)) wp_mkdir_p($dir);
+    $file = $dir.'/note-'.time().'-'.wp_generate_uuid4().'.mp3';
+    file_put_contents($file, $body);
 
-/** Sanitize “action buttons” repeater */
-function fvqa_sanitize_action_buttons($rows){
-    $out=[]; $models=fvqa_model_choices();
-    if (!is_array($rows)) return $out;
-    foreach($rows as $row){
-        $id    = isset($row['id'])? sanitize_text_field($row['id']) : '';
-        $id    = $id ?: wp_generate_uuid4();
-        $label = isset($row['label'])? sanitize_text_field($row['label']) : '';
-        $model = isset($row['model'])? sanitize_text_field($row['model']) : 'gpt-4o-mini';
-        if (!isset($models[$model])) $model='gpt-4o-mini';
-        $sys   = isset($row['system_prompt'])? wp_kses_post($row['system_prompt']) : '';
-        $usr   = isset($row['user_prompt'])  ? wp_kses_post($row['user_prompt'])   : '';
-        if ($label==='') continue;
-        $out[] = ['id'=>$id,'label'=>$label,'model'=>$model,'system_prompt'=>$sys,'user_prompt'=>$usr];
-    }
-    return array_values($out);
+    $url = trailingslashit($uploads['baseurl']).'fvqa-audio/'.basename($file);
+    return array('url'=>$url);
 }
-
-/** Extract first Vimeo numeric ID from HTML/text */
-function fvqa_extract_first_vimeo_id($blob){
-    if (!is_string($blob) || $blob==='') return null;
-    $patterns=[
-        '/data-vimeo-id=[\'"](\d{7,12})[\'"]/i',
-        '#player\.vimeo\.com\/video\/(\d{7,12})#i',
-        '#vimeo\.com\/(\d{7,12})(?:\/[a-zA-Z0-9_\/\-]+)?#i',
-        '#https?:\/\/vimeo\.com\/manage\/videos\/(\d{7,12})#i',
-    ];
-    foreach($patterns as $re){
-        if (preg_match($re,$blob,$m)) return $m[1];
-    }
-    return null;
-}
-
-/** Guess Vimeo ID from current post */
-function fvqa_guess_video_id_from_post($post_id){
-    if (!$post_id) return null;
-    $post=get_post($post_id); if(!$post) return null;
-    $id=fvqa_extract_first_vimeo_id($post->post_content); if($id) return $id;
-    $meta=get_post_meta($post_id);
-    if (is_array($meta)){
-        foreach($meta as $k=>$vals){
-            foreach((array)$vals as $v){
-                if (is_string($v)){
-                    $id=fvqa_extract_first_vimeo_id($v);
-                    if($id) return $id;
-                }
-            }
-        }
-    }
-    return null;
-}
-
-/** Filter: server-side fallback for current video id */
-function fvqa_current_video_id_default($value){
-    if (!empty($value)) return $value;
-    if (is_singular()) {
-        $id=fvqa_guess_video_id_from_post(get_the_ID());
-        if ($id) return $id;
-    }
-    return $value;
-}
-add_filter('fvqa_current_video_id','fvqa_current_video_id_default');
