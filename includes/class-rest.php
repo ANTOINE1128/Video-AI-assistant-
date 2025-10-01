@@ -34,6 +34,42 @@ class FVQA_REST {
         ));
     }
 
+    /** Small helper: count chunks for a video id */
+    private function chunks_count($video_id){
+        global $wpdb;
+        if (!$video_id) return 0;
+        $table = $wpdb->prefix.'fvqa_chunks';
+        return intval( $wpdb->get_var( $wpdb->prepare("SELECT COUNT(*) FROM $table WHERE video_id=%s", $video_id) ) );
+    }
+
+    /** Try to ensure video is indexed (with a transient lock to avoid races) */
+    private function ensure_indexed_if_needed($video_id, $options){
+        if (!$video_id) return;
+
+        $have = $this->chunks_count($video_id);
+        if ($have > 0) return;
+
+        // Prevent concurrent indexing storms if multiple students click at once
+        $lock_key = 'fvqa_indexing_lock_'.$video_id;
+        if ( get_transient($lock_key) ) {
+            // Someone else is indexing. Give it a moment to finish on next request.
+            return;
+        }
+        set_transient($lock_key, 1, 60); // lock for 60s
+
+        try {
+            if ( class_exists('FVQA_Indexer') ) {
+                $idx = new FVQA_Indexer($options['openai_key'], $options);
+                $idx->ensure_indexed($video_id);
+            }
+        } catch (\Throwable $e) {
+            // Log but don't fatal the request; retrieval may still succeed if chunks appear later.
+            error_log('[FVQA] Indexing failed for video '.$video_id.' : '.$e->getMessage());
+        } finally {
+            delete_transient($lock_key);
+        }
+    }
+
     public function ask(\WP_REST_Request $req){
         $o = fvqa_get_settings();
         $question   = (string)($req->get_param('question') ?? '');
@@ -69,6 +105,16 @@ class FVQA_REST {
             }
         }
 
+        // ✅ NEW: auto-index this video if we have zero chunks
+        try {
+            if (!empty($video_id)) {
+                $this->ensure_indexed_if_needed($video_id, $o);
+            }
+        } catch(\Throwable $e){
+            // Don't hard fail; proceed to retrieval with whatever we have
+            error_log('[FVQA] ensure_indexed_if_needed error for '.$video_id.': '.$e->getMessage());
+        }
+
         try {
             $rtv = new FVQA_Retriever($o['openai_key'], $o['similarity_threshold'], $o['max_chunks'], $gen);
             $res = $rtv->answer($video_id, $question, $time_hint);
@@ -77,7 +123,15 @@ class FVQA_REST {
         }
 
         $answer_text = (string)($res['answer'] ?? '');
-        $sources = $res['sources'] ?? array();
+        $sources     = $res['sources'] ?? array();
+
+        // If still empty, add a useful hint in debug mode
+        if ($answer_text === '' || $answer_text === "I couldn't find that in this video.") {
+            $cnt = !empty($video_id) ? $this->chunks_count($video_id) : -1;
+            if (!empty($o['debug_logs'])) {
+                error_log("[FVQA] Retrieval says 'not found'. video_id={$video_id} chunks={$cnt} q='".substr($question,0,120)."'");
+            }
+        }
 
         $out = array('answer'=>$answer_text, 'sources'=>$sources);
 

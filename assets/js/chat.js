@@ -3,6 +3,7 @@
   const cfg = window.FVQA_CFG || {};
   const $doc = $(document);
 
+  /* ---------- Vimeo ID detection ---------- */
   function detectVideoId(){
     const dataEl = document.querySelector('[data-vimeo-id]');
     if (dataEl && /^\d{7,12}$/.test(dataEl.getAttribute('data-vimeo-id'))) return dataEl.getAttribute('data-vimeo-id');
@@ -28,6 +29,39 @@
     return null;
   }
 
+  /** Robust extraction: understands “minute 12”, “in minute 10”, “12 min”, “12m”, “at 12:00”, etc. */
+  function extractSeconds(s){
+    if(!s) return null;
+    s = (s+'').toLowerCase().trim();
+
+    // 1) H:MM:SS
+    let m = s.match(/\b(\d{1,2}):(\d{2}):(\d{2})\b/);
+    if (m) return parseInt(m[1],10)*3600 + parseInt(m[2],10)*60 + parseInt(m[3],10);
+
+    // 2) MM:SS
+    m = s.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (m) return parseInt(m[1],10)*60 + parseInt(m[2],10);
+
+    // 3) “12 minutes”, “12 min”, “12m”, “12mins”
+    m = s.match(/\b(\d{1,4})\s*(?:m|min|mins|minute|minutes)\b/);
+    if (m) return parseInt(m[1],10) * 60;
+
+    // 4) “minute 12”, “in minute 10”, “at the minute 3”
+    m = s.match(/\b(?:at|in|on)?\s*(?:the\s*)?(?:minute|min)\s+(\d{1,4})\b/);
+    if (m) return parseInt(m[1],10) * 60;
+
+    // 5) Ordinals: “the 12th minute”
+    m = s.match(/\b(?:the\s*)?(\d{1,4})(?:st|nd|rd|th)?\s+minute\b/);
+    if (m) return parseInt(m[1],10) * 60;
+
+    // 6) Seconds forms
+    m = s.match(/\b(\d{1,5})\s*s(?:ec|econds?)?\b/);
+    if (m) return parseInt(m[1],10);
+
+    return null;
+  }
+
+  /* ---------- DOM helpers ---------- */
   function widgetRoot(){ return $('.fvqa-widget'); }
 
   function ensureBubble(){
@@ -60,7 +94,6 @@
     if (on) $thinking.removeAttr('hidden'); else $thinking.attr('hidden', true);
   }
 
-  // Helper: build payload without nulls (so WP doesn't reject types)
   function buildPayload(base){
     const out = {};
     Object.keys(base).forEach(k => {
@@ -71,6 +104,48 @@
     return out;
   }
 
+  /* ---------- Markdown/HTML rendering (with graceful fallback) ---------- */
+  function renderMarkdownSafe(md){
+    try {
+      const s = String(md || '');
+      const looksLikeHTML = /<\/?[a-z][\s\S]*>/i.test(s); // crude but effective
+
+      const haveDOMPurify = !!(window.DOMPurify && window.DOMPurify.sanitize);
+      const haveMarked    = !!(window.marked && window.marked.parse);
+
+      let html;
+
+      if (looksLikeHTML) {
+        // Already HTML → just sanitize below
+        html = s;
+      } else if (haveMarked) {
+        // Markdown → HTML
+        html = window.marked.parse(s);
+      } else {
+        // Plain fallback (no marked available)
+        const esc = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        html = '<p>'+esc.replace(/\n{2,}/g,'</p><p>').replace(/\n/g,'<br>')+'</p>';
+      }
+
+      if (haveDOMPurify) {
+        html = window.DOMPurify.sanitize(html, {
+          ALLOWED_TAGS: [
+            'h1','h2','h3','h4',
+            'p','ul','ol','li',
+            'strong','em','code','pre',
+            'blockquote','hr','a','br'
+          ],
+          ALLOWED_ATTR: ['href','title','target','rel']
+        });
+      }
+      return html;
+    } catch (e) {
+      // Ultimate fallback: plain text
+      return '<p>'+String(md || '').replace(/</g,'&lt;')+'</p>';
+    }
+  }
+
+  /* ---------- Network ---------- */
   function sendAsk($root, payload){
     const $msgs = $root.find('.fvqa-messages');
     setThinking($root, true);
@@ -78,21 +153,32 @@
     payload.video_id = payload.video_id || detectVideoId();
 
     return $.ajax({
-      url: cfg.rest.url, // /wp-json/fvqa/v1/ask
+      url: (cfg.rest && cfg.rest.url) ? cfg.rest.url : '/wp-json/fvqa/v1/ask',
       method: 'POST',
-      headers: { 'X-WP-Nonce': cfg.rest.nonce },
+      headers: { 'X-WP-Nonce': (cfg.rest && cfg.rest.nonce) ? cfg.rest.nonce : '' },
       contentType: 'application/json',
       data: JSON.stringify(buildPayload(payload))
     }).always(function(){ setThinking($root, false); })
       .done(function(res){
-        if (!res) { addMessage($msgs, 'assistant', 'Sorry, empty response.'); return; }
-        if (res.error) { addMessage($msgs, 'assistant', 'Error: ' + res.error); return; }
-
-        if (res.answer) addMessage($msgs, 'assistant', res.answer);
-        else addMessage($msgs, 'assistant', 'Sorry, I could not produce an answer.');
+        if (!res) {
+          addMessage($msgs, 'assistant', 'Sorry, empty response.');
+          return;
+        }
+        if (res.error) {
+          addMessage($msgs, 'assistant', 'Error: ' + res.error);
+          return;
+        }
+        if (res.answer) {
+          const html = renderMarkdownSafe(res.answer);
+          addMessageHTML($msgs, 'assistant', html);
+        } else {
+          addMessage($msgs, 'assistant', 'Sorry, I could not produce an answer.');
+        }
 
         if (res.sources && res.sources.length) {
-          addMessage($msgs, 'meta', 'Sources: ' + res.sources.join(' • '));
+          const srcLine = Array.isArray(res.sources) ? res.sources.join(' • ') : String(res.sources);
+          const html = '<div class="fvqa-sources" aria-label="Sources"><small><em>Sources:</em> '+srcLine+'</small></div>';
+          addMessageHTML($msgs, 'meta', html);
         }
 
         if (res.audio_url) {
@@ -114,7 +200,9 @@
       });
   }
 
-  // Send message (chat mode) — we do NOT send a time_hint; server infers from text if needed
+  /* ---------- UI events ---------- */
+
+  // Send message (chat mode)
   $doc.on('click', '.fvqa-send', function(e){
     e.preventDefault();
     const $root = widgetRoot();
@@ -122,6 +210,7 @@
     const q = $text.val().trim();
     if (!q) return;
 
+    const secs = extractSeconds(q);
     addMessage($root.find('.fvqa-messages'), 'user', q);
 
     const payload = {
@@ -129,18 +218,20 @@
       mode:      'chat',
       button_id: ''
     };
+    if (secs !== null) payload.time_hint = secs;
 
     sendAsk($root, payload);
     $text.val('');
   });
 
-  // Action buttons — whole-video default: NO time_hint sent
+  // Action buttons
   $doc.on('click', '.fvqa-action-btn', function(e){
     e.preventDefault();
     const $btn  = $(this);
     const $root = $btn.closest('.fvqa-widget');
     const $text = $root.find('.fvqa-text');
     const q = $text.val().trim();
+    const secs = extractSeconds(q);
     const label = $btn.text().trim();
     const id = $btn.data('id') || '';
     const wantAudio = !!$btn.data('audio');
@@ -153,6 +244,7 @@
       button_id:  id,
       want_audio: wantAudio
     };
+    if (secs !== null) payload.time_hint = secs;
 
     sendAsk($root, payload);
     $text.val('');

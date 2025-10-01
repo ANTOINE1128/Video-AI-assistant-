@@ -30,20 +30,29 @@ class FVQA_Indexer {
         $body = json_decode( wp_remote_retrieve_body($resp), true );
         if ($code>=400 || !is_array($body)) throw new \Exception('Vimeo error: '.$code);
 
-        // 2) Prefer English captions
+        // 2) Prefer English tracks; accept both "captions" and "subtitles"
+        $pick = function($rows, $want_en=true){
+            foreach ($rows as $t){
+                $type = strtolower($t['type'] ?? '');
+                if ($type !== 'captions' && $type !== 'subtitles') continue;
+
+                $lang = strtolower($t['language'] ?? '');
+                $is_en = ($lang === 'en') || (strpos($lang, 'en-') === 0); // matches en, en-us, en-x-autogen, etc.
+
+                if ($want_en && !$is_en) continue;
+                if (!empty($t['link'])) return $t['link'];
+            }
+            return null;
+        };
+
         $link = null;
         if (!empty($body['data']) && is_array($body['data'])){
-            foreach($body['data'] as $t){
-                if (($t['type']??'')==='captions' && strpos(strtolower($t['language']??''),'en')===0 && !empty($t['link'])){
-                    $link = $t['link']; break;
-                }
-            }
-            if (!$link){
-                // fallback to any captions track
-                foreach($body['data'] as $t){ if(($t['type']??'')==='captions' && !empty($t['link'])){ $link=$t['link']; break; } }
-            }
+            // English first (captions or subtitles)
+            $link = $pick($body['data'], true);
+            // fallback: any language (still captions or subtitles)
+            if (!$link) $link = $pick($body['data'], false);
         }
-        if (!$link) throw new \Exception('No caption track found on Vimeo.');
+        if (!$link) throw new \Exception('No suitable caption/subtitle track found on Vimeo.');
 
         // 3) Download VTT
         $resp2 = fvqa_http_with_retry('GET', $link, ['timeout'=>30], 1);
@@ -65,7 +74,7 @@ class FVQA_Indexer {
 
         $rows=[];
         foreach($parts as $block){
-            // Lines like: "00:00:05.000 --> 00:00:07.000"
+            // Lines like: "00:00:05.000 --> 00:00:07.000" or "00:05.000 --> 00:07.000"
             if (preg_match('/(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}:\d{2}\.\d{3})/',$block,$m)){
                 $start = $this->time_to_sec($m[1]); $end=$this->time_to_sec($m[2]);
                 $text  = trim( preg_replace('/^.*-->.*/m','',$block) );
@@ -97,5 +106,5 @@ class FVQA_Indexer {
         if (preg_match('/^(\d{2}):(\d{2})\.(\d{3})$/',$s,$m))
             return intval($m[1])*60+intval($m[2]);
         return 0;
-    }
+        }
 }

@@ -10,7 +10,12 @@ class FVQA_Frontend {
 
     public function assets() {
         wp_register_style ('fvqa-chat', FVQA_URL.'assets/css/chat.css', array(), FVQA_VERSION);
-        wp_register_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', array('jquery'), FVQA_VERSION, true);
+
+        // Register Marked + DOMPurify so chat.js can depend on them
+        wp_register_script('fvqa-marked',    FVQA_URL.'assets/js/marked.min.js', array(), '12.0.0', true);
+        wp_register_script('fvqa-dompurify', FVQA_URL.'assets/js/purify.min.js', array(), '3.0.6',  true);
+
+        wp_register_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', array('jquery','fvqa-marked','fvqa-dompurify'), FVQA_VERSION, true);
     }
 
     public function shortcode($atts) {
@@ -21,35 +26,41 @@ class FVQA_Frontend {
 
     public function maybe_floating_bubble() {
         // Show only on LearnDash Topic pages (adjust if needed)
-        if ( is_singular('sfwd-topic') ) {
+        if ( function_exists('is_singular') && is_singular('sfwd-topic') ) {
             $this->render_widget(false);
         }
     }
 
     private function render_widget($inline) {
-        $opt = fvqa_get_settings();
+        $opt = function_exists('fvqa_get_settings') ? fvqa_get_settings() : [];
         wp_enqueue_style ('fvqa-chat');
+        wp_enqueue_script('fvqa-marked');
+        wp_enqueue_script('fvqa-dompurify');
         wp_enqueue_script('fvqa-chat');
 
         // Prepare action definitions for the client (no system prompt for security)
         $actions = array();
-        foreach ( $opt['action_buttons'] as $row ) {
-            $actions[] = array(
-                'id'          => $row['id'],
-                'label'       => $row['label'],
-                'user_prompt' => $row['user_prompt'],
-                'model'       => $row['model'],
-            );
+        if (!empty($opt['action_buttons']) && is_array($opt['action_buttons'])) {
+            foreach ( $opt['action_buttons'] as $row ) {
+                if (empty($row['id']) || empty($row['label'])) continue;
+                $actions[] = array(
+                    'id'          => $row['id'],
+                    'label'       => $row['label'],
+                    'user_prompt' => $row['user_prompt'] ?? '',
+                    'model'       => $row['model'] ?? '',
+                );
+            }
         }
 
         wp_localize_script('fvqa-chat', 'FVQA_CFG', array(
             'rest'       => array(
-                'url'  => esc_url_raw( rest_url('farhat-qa/v1/ask') ),
-                'nonce'=> wp_create_nonce('wp_rest')
+                // ✅ Use the correct REST route
+                'url'   => esc_url_raw( rest_url('fvqa/v1/ask') ),
+                'nonce' => wp_create_nonce('wp_rest')
             ),
             'ui'         => array(
                 'title'      => 'Ask about this video',
-                'thinking'   => 'Thinking…',
+                'thinking'   => isset($opt['thinking_text']) ? $opt['thinking_text'] : 'Thinking…',
                 'sendLabel'  => 'Send',
                 'fullscreen' => 'Fullscreen',
                 'close'      => 'Close',
