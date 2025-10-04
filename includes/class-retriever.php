@@ -17,7 +17,6 @@ class FVQA_Retriever {
     /* ============================== FAST-PATH CACHING ============================== */
 
     private function cache_key_notes($video_id){
-        // bump version if you change map prompt/tokenization
         return 'fvqa_notes_v1_'.$video_id;
     }
     private function get_cached_notes($video_id){
@@ -28,22 +27,114 @@ class FVQA_Retriever {
     }
     private function set_cached_notes($video_id, $notes){
         $k = $this->cache_key_notes($video_id);
-        // Cache for 12 hours (tweak if you like)
         wp_cache_set($k, $notes, 'fvqa', 12 * HOUR_IN_SECONDS);
         set_transient($k, $notes, 12 * HOUR_IN_SECONDS);
     }
 
     /* ================================= helpers ================================= */
 
-    /** (Kept for reference, but disabled: we do NOT infer time automatically) */
-    private function guess_time_from_text($text){
-        $s = strtolower((string)$text);
-        if (preg_match('/\b(\d{1,2}):(\d{2}):(\d{2})\b/', $s, $m)) return intval($m[1])*3600 + intval($m[2])*60 + intval($m[3]);
-        if (preg_match('/\b(\d{1,2}):(\d{2})\b/', $s, $m)) return intval($m[1])*60 + intval($m[2]);
-        if (preg_match('/\b(\d{1,4})\s*(m|min|mins|minute|minutes)\b/', $s, $m)) return intval($m[1]) * 60;
-        if (preg_match('/\b(?:at|in|on)?\s*(?:the\s*)?(minute|min)\s+(\d{1,4})\b/', $s, $m)) return intval($m[2]) * 60;
-        if (preg_match('/\b(?:the\s*)?(\d{1,4})(?:st|nd|rd|th)?\s+minute\b/', $s, $m)) return intval($m[1]) * 60;
-        return null;
+    /** Detect if the admin/button prompts explicitly want HTML output */
+    private function expects_html_output($orig_system, $user_tpl){
+        $s = strtolower((string)$orig_system.' '.$user_tpl);
+        if (strpos($s, 'output html only') !== false) return true;
+        if (preg_match('/<\s*(h[1-6]|p|ul|ol|li|strong|em|code|blockquote)\b/i', $user_tpl)) return true;
+        // If the button text hints at a quiz/test, we’ll prefer HTML as well.
+        if (strpos($s, 'quiz') !== false || strpos($s, 'test my understanding') !== false) return true;
+        return false;
+    }
+
+    /** Return TRUE if the text looks like a quiz that should be HTML-formatted */
+    private function looks_like_quiz_text($text){
+        $t = (string)$text;
+        // any “Q1.” style, or Answer:/Why: lines, or plain True/False options
+        if (preg_match('/\bQ\d+\./i', $t)) return true;
+        if (preg_match('/^\s*Answer\s*:/mi', $t)) return true;
+        if (preg_match('/^\s*Why\s*:/mi', $t)) return true;
+        if (preg_match('/^\s*(True|False)\s*$/mi', $t)) return true;
+        // starts with a recognizable section
+        if (preg_match('/^\s*(Quick Check|Questions|Review Notes)\b/i', $t)) return true;
+        return false;
+    }
+
+    /** Minimal “plain-text quiz → HTML” coercion used as a last resort */
+    private function coerce_quiz_html($text){
+        $lines = preg_split('/\r\n|\r|\n/', trim((string)$text));
+        $out = [];
+        $in_ul = false;
+        $buffer_p = '';
+
+        $flush_p = function() use (&$buffer_p,&$out){
+            $t = trim($buffer_p);
+            if ($t !== '') $out[] = '<p>'.esc_html($t).'</p>';
+            $buffer_p = '';
+        };
+        $start_ul = function() use (&$in_ul,&$out){ if (!$in_ul){ $out[]='<ul>'; $in_ul=true; } };
+        $end_ul = function() use (&$in_ul,&$out){ if ($in_ul){ $out[]='</ul>'; $in_ul=false; } };
+
+        foreach ($lines as $raw) {
+            $line = trim($raw);
+            if ($line === '') { $end_ul(); $flush_p(); continue; }
+
+            // Section headings
+            if (preg_match('/^questions?$/i', $line)) { $end_ul(); $flush_p(); $out[]='<h3>Questions</h3>'; continue; }
+            if (preg_match('/^review notes?$/i', $line)) { $end_ul(); $flush_p(); $out[]='<h2>Review Notes</h2>'; continue; }
+            if (preg_match('/^q\d+\./i', $line)) { $end_ul(); $flush_p(); $out[]='<h4>'.esc_html($line).'</h4>'; continue; }
+
+            // Multiple-choice A) / B) / C) / D)
+            if (preg_match('/^[A-D]\)\s*(.+)$/', $line)) {
+                $flush_p(); $start_ul();
+                $out[] = '<li>'.esc_html($line).'</li>';
+                continue;
+            }
+
+            // True / False block lines
+            if (preg_match('/^(true|false)$/i', $line)) {
+                $flush_p(); $start_ul();
+                $out[] = '<li>'.esc_html(ucfirst(strtolower($line))).'</li>';
+                continue;
+            }
+
+            // Answer: ...
+            if (preg_match('/^answer\s*:\s*(.+)$/i', $line, $m)) {
+                $end_ul(); $flush_p();
+                $out[] = '<p><strong>Answer:</strong> '.esc_html($m[1]).'</p>';
+                continue;
+            }
+
+            // Why: ...
+            if (preg_match('/^why\s*:\s*(.+)$/i', $line, $m)) {
+                $end_ul(); $flush_p();
+                $out[] = '<p><em>Why:</em> '.esc_html($m[1]).'</p>';
+                continue;
+            }
+
+            // Fallback → paragraph buffer
+            if ($buffer_p !== '') $buffer_p .= ' ';
+            $buffer_p .= $line;
+        }
+        // close any open blocks
+        $end_ul(); $flush_p();
+
+        // If we somehow didn’t build anything, just wrap everything
+        if (empty($out)) {
+            return '<p>'.esc_html($text).'</p>';
+        }
+
+        // Guarantee top title if the quiz starts straight with Q1.
+        $html = implode("\n", $out);
+        if (strpos($html, '<h2') === false && preg_match('/<h4>Q\d+\./i', $html)) {
+            $html = '<h2>Quick Check</h2><p>Answer the questions below to test your understanding.</p>'."\n".$html;
+        }
+        return $html;
+    }
+
+    /** Strip timestamps like [12:34] from model output */
+    private function strip_timestamps($s){
+        $s = preg_replace('/\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}\]\s*/', ' ', (string)$s);
+        $s = preg_replace('/[ \t]{2,}/', ' ', $s);
+        $s = preg_replace("/\n{3,}/", "\n\n", $s);
+        $s = preg_replace('/\s*[-–—]\s*(?=\n|$)/', '', $s);
+        return trim($s);
     }
 
     private function is_audio_notes(){
@@ -228,7 +319,7 @@ class FVQA_Retriever {
         foreach ($parts as $i => $p){
             $prompt = "Compress these excerpts into dense bullet notes (no timestamps, accurate facts):\n\n".$p;
             $res = $this->openai_generate($model, $sys, $prompt, [
-                'max_tokens'  => 350,   // ↓ tighter for speed (was 600)
+                'max_tokens'  => 350,
                 'temperature' => 0.2,
                 'top_p'       => 1.0,
                 'model'       => $model
@@ -244,24 +335,25 @@ class FVQA_Retriever {
 
     /** Final compose from pre-compressed notes (uses admin-selected model) */
     private function compose_from_notes($final_model, $orig_system, $user_tpl, $question, $notes_joined, $timeHint, $is_audio_notes){
-        // Keep Markdown output here (your frontend converts/cleans); if you prefer HTML, change this to HTML rules
-        $rules  = "- Do NOT include timestamps such as [MM:SS] or [H:MM:SS].\n"
-                . "- Teacherly tone: clear, accurate explanations; concise where possible.\n"
-                . "- Output MUST be GitHub-flavored Markdown with structure: use ### headings, #### subheadings, bullet lists, numbered steps when procedural, and short paragraphs.\n"
-                . "- Bold key terms where helpful. Avoid raw HTML; use Markdown only. Avoid tables unless essential.\n"
-                . "- Base everything ONLY on the provided notes; if insufficient, say so.\n";
+        $expects_html = $this->expects_html_output($orig_system, $user_tpl);
+
+        $rules_html =
+            "- OUTPUT HTML ONLY (no Markdown, no backticks, no inline styles).\n".
+            "- Use semantic structure: <h2>, <h3>, <p>, <ul><li>, <ol><li>, <strong>, <code>, <blockquote>.\n".
+            "- Do NOT include raw timestamps except inside bracketed citations if quoting.\n".
+            "- Teacherly tone: clear, accurate, concise. Base ONLY on provided notes.\n";
+
+        $rules_md =
+            "- Do NOT include raw timestamps like [MM:SS] unless quoting.\n".
+            "- Output MUST be GitHub-flavored Markdown with ### headings, #### subheadings, lists, and short paragraphs. Bold key terms. No raw HTML.\n".
+            "- Teacherly tone: clear, accurate, concise. Base ONLY on provided notes.\n";
 
         if ($is_audio_notes){
-            $rules .= "- Length target: about 350–600 words (detailed but not verbose).\n"
-                    . "- Suggested sections:\n"
-                    . "  • ### Overview — 1–2 short paragraphs.\n"
-                    . "  • ### Key Points — 8–15 bullets with definitions, rules, numbers, examples.\n"
-                    . "  • ### Takeaways — 3–6 bullets students should remember.\n";
-        } else {
-            $rules .= "- Follow the button’s requested format if any (sections/headings/counts) while keeping Markdown structure.\n";
+            $rules_html .= "- Length target: about 350–600 words.\n";
+            $rules_md   .= "- Length target: about 350–600 words.\n";
         }
 
-        $system_prompt = rtrim((string)$orig_system)."\n\nCRITICAL OUTPUT RULES:\n".$rules;
+        $system_prompt = rtrim((string)$orig_system)."\n\nCRITICAL OUTPUT RULES:\n".($expects_html ? $rules_html : $rules_md);
 
         $user = strtr((string)$user_tpl, [
             '{question}'  => (string)$question,
@@ -269,8 +361,7 @@ class FVQA_Retriever {
             '{timestamp}' => ($timeHint !== null ? $this->format_timestamp($timeHint) : ''),
         ]);
 
-        // Respect admin tokens if set; otherwise keep a brisk default
-        $max_out = isset($this->gen['max_tokens']) ? max(1, intval($this->gen['max_tokens'])) : 800; // ↓ was 1024
+        $max_out = isset($this->gen['max_tokens']) ? max(1, intval($this->gen['max_tokens'])) : 800;
         if ($is_audio_notes) $max_out = max($max_out, 1200);
 
         $res = $this->openai_generate($final_model, $system_prompt, $user, [
@@ -281,7 +372,13 @@ class FVQA_Retriever {
         ]);
 
         if ( is_wp_error($res) ) return $res;
-        return $this->strip_timestamps( trim((string)$res) );
+
+        $txt = $this->strip_timestamps( trim((string)$res) );
+        // NEW: Coerce if (a) HTML was expected and not present OR (b) it looks like a quiz
+        if ( !preg_match('/<\s*(h[1-6]|p|ul|ol|li)\b/i', $txt) && ($expects_html || $this->looks_like_quiz_text($txt)) ) {
+            $txt = $this->coerce_quiz_html($txt);
+        }
+        return $txt;
     }
 
     /* ================================== main ================================== */
@@ -290,12 +387,11 @@ class FVQA_Retriever {
         global $wpdb; 
         $table = $wpdb->prefix . 'fvqa_chunks';
 
-        // IMPORTANT: we no longer infer time automatically; only use client-provided $timeHint.
-
-        $button_model   = $this->gen['model'] ?? 'gpt-4o-mini';  // Admin can switch; we keep a fast default
+        $button_model   = $this->gen['model'] ?? 'gpt-4o-mini';
         $orig_system    = (string)($this->gen['system_prompt'] ?? '');
         $user_tpl       = (string)($this->gen['user_prompt']   ?? '{sources}');
         $is_audio_notes = $this->is_audio_notes();
+        $expects_html   = $this->expects_html_output($orig_system, $user_tpl);
 
         /* ---------------- time-specific path (only if client sent time) ---------------- */
         if ($timeHint !== null){
@@ -337,13 +433,19 @@ class FVQA_Retriever {
 
             [$sources_text, $sources] = $this->build_sources_from_rows($rows, 24000);
 
-            $system_prompt = rtrim($orig_system)."\n\n".
-                "CRITICAL OUTPUT RULES:\n".
-                "- Explain what is being discussed around the requested minute and the context before/after.\n".
-                "- If the exact minute is missing, infer from the nearest segments you were given.\n".
-                "- Do NOT include timestamps such as [MM:SS] or [H:MM:SS] in the answer.\n".
-                "- Output MUST be GitHub-flavored Markdown with ### headings, #### subheadings, bullet lists, and short paragraphs. Bold key terms. No raw HTML.\n".
-                "- Be a patient teacher: clear, concise, and accurate. Only use the excerpts.\n";
+            $rules_html =
+                "- Explain what is being discussed around the requested minute and nearby context.\n".
+                "- OUTPUT HTML ONLY (no Markdown). Use <h2>, <h3>, <p>, <ul><li>, <ol><li>, <strong>, <code>, <blockquote>.\n".
+                "- Do NOT include raw timestamps in the answer body except within bracketed citations if quoting.\n".
+                "- Base strictly on the excerpts provided.\n";
+
+            $rules_md =
+                "- Explain what is being discussed around the requested minute and nearby context.\n".
+                "- Use GitHub-flavored Markdown with ### headings, lists, short paragraphs.\n".
+                "- Do NOT include raw timestamps in the answer body except within bracketed citations if quoting.\n".
+                "- Base strictly on the excerpts provided.\n";
+
+            $system_prompt = rtrim($orig_system)."\n\nCRITICAL OUTPUT RULES:\n".($expects_html ? $rules_html : $rules_md);
 
             $user = strtr($user_tpl, [
                 '{question}'  => (string)$question,
@@ -356,6 +458,9 @@ class FVQA_Retriever {
                 return ['answer'=>'Error: OpenAI error: '.$answer->get_error_message(), 'sources'=>$sources];
             }
             $text = $this->strip_timestamps( trim((string)$answer) );
+            if ( !preg_match('/<\s*(h[1-6]|p|ul|ol|li)\b/i', $text) && ($expects_html || $this->looks_like_quiz_text($text)) ) {
+                $text = $this->coerce_quiz_html($text);
+            }
             if ($text==='') $text='I couldn’t find that in this video.';
             return ['answer'=>$text, 'sources'=>$sources];
         }
@@ -369,14 +474,12 @@ class FVQA_Retriever {
 
         // 1) Try cached notes
         $notes_joined = $this->get_cached_notes($video_id);
-        $big_sources_tags = []; // for UI's Sources line
+        $big_sources_tags = [];
 
         if ($notes_joined === '') {
-            // Build big sources text & split ONLY on a cache miss
             [$big_sources_text, $big_sources_tags] = $this->build_sources_from_rows($all, 500000);
             $parts = $this->split_sources($big_sources_text, 8000); // ≤8k chars each
 
-            // Map (fast model, lower tokens) → big win cached
             $map_model = $this->gen['map_model'] ?? 'gpt-4.1-mini';
             $compressed_notes = $this->compress_parts($map_model, $parts);
             $notes_joined = implode("\n", $compressed_notes);
@@ -385,7 +488,6 @@ class FVQA_Retriever {
                 $this->set_cached_notes($video_id, $notes_joined);
             }
         } else {
-            // Build a compact tags list for the UI (first/last few timestamps)
             $first_rows = array_slice($all, 0, 5);
             $last_rows  = array_slice($all, max(0, count($all)-5));
             $tags = [];
@@ -396,20 +498,23 @@ class FVQA_Retriever {
         }
 
         if ($notes_joined === ''){
-            // Fallback to uniform sampling if map produced nothing
             $fallback_rows = $this->fetch_uniform_chunks($video_id, min(240, max(80, $this->k * 8)));
             [$sources_text, $sources] = $this->build_sources_from_rows($fallback_rows, 24000);
 
-            $system_prompt = rtrim($orig_system)."\n\n".
-                "CRITICAL OUTPUT RULES:\n".
-                "- Do NOT include timestamps such as [MM:SS] or [H:MM:SS] in the answer.\n".
-                "- Output MUST be GitHub-flavored Markdown with ### headings, #### subheadings, bullet lists, and short paragraphs. Bold key terms. No raw HTML.\n".
-                "- Teacherly tone: clear, accurate, concise.\n".
-                "- Base everything ONLY on the excerpts; if insufficient, say so.\n";
+            $rules_html =
+                "- OUTPUT HTML ONLY (no Markdown). Use <h2>, <h3>, <p>, <ul><li>, <ol><li>, <strong>, <code>, <blockquote>.\n".
+                "- Teacherly tone; base ONLY on the excerpts.\n";
+
+            $rules_md =
+                "- Output in GitHub-flavored Markdown with ### headings, lists, short paragraphs; bold key terms.\n".
+                "- Teacherly tone; base ONLY on the excerpts.\n";
 
             if ($this->is_audio_notes()){
-                $system_prompt .= "- Length target: about 350–600 words. Prefer ### Overview, ### Key Points, ### Takeaways.\n";
+                $rules_html .= "- Length target: about 350–600 words.\n";
+                $rules_md   .= "- Length target: about 350–600 words.\n";
             }
+
+            $system_prompt = rtrim($orig_system)."\n\nCRITICAL OUTPUT RULES:\n".($expects_html ? $rules_html : $rules_md);
 
             $user = strtr($user_tpl, [
                 '{question}'  => (string)$question,
@@ -422,14 +527,20 @@ class FVQA_Retriever {
                 return ['answer'=>'Error: OpenAI error: '.$ans->get_error_message(), 'sources'=>$big_sources_tags];
             }
             $clean = $this->strip_timestamps( trim((string)$ans) );
+            if ( !preg_match('/<\s*(h[1-6]|p|ul|ol|li)\b/i', $clean) && ($expects_html || $this->looks_like_quiz_text($clean)) ) {
+                $clean = $this->coerce_quiz_html($clean);
+            }
             if ($clean==='') $clean='I couldn’t find that in this video.';
             return ['answer'=>$clean, 'sources'=>$big_sources_tags];
         }
 
-        // 2) Compose (admin-selected model) — fast
+        // 2) Compose (admin-selected model)
         $final = $this->compose_from_notes($button_model, $orig_system, $user_tpl, $question, $notes_joined, null, $is_audio_notes);
         if ( is_wp_error($final) ) {
             return ['answer'=>'Error: OpenAI error: '.$final->get_error_message(), 'sources'=>$big_sources_tags];
+        }
+        if ( !preg_match('/<\s*(h[1-6]|p|ul|ol|li)\b/i', $final) && ($expects_html || $this->looks_like_quiz_text($final)) ) {
+            $final = $this->coerce_quiz_html($final);
         }
         if ($final==='') $final='I couldn’t find that in this video.';
         return ['answer'=>$final, 'sources'=>$big_sources_tags];
@@ -442,17 +553,18 @@ class FVQA_Retriever {
         return sprintf('%02d:%02d', floor($sec/60), $sec%60);
     }
 
-    private function strip_timestamps($s){
-        $s = preg_replace('/\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}\]\s*/', ' ', (string)$s);
-        $s = preg_replace('/[ \t]{2,}/', ' ', $s);
-        $s = preg_replace("/\n{3,}/", "\n\n", $s);
-        $s = preg_replace('/\s*[-–—]\s*(?=\n|$)/', '', $s);
-        return trim($s);
-    }
-
+    /**
+     * Only these families accept temperature/top_p. Excludes gpt-5 and o-series (reasoning),
+     * which reject sampling params via the Responses API.
+     */
     private function model_supports_sampling_params($model){
-        $allow = array('gpt-4o','gpt-4o-mini','gpt-4.1','gpt-4.1-mini','gpt-4-turbo','gpt-3.5-turbo');
-        foreach ($allow as $a){ if (stripos($model, $a) === 0) return true; }
+        $m = strtolower((string)$model);
+        if (strpos($m, 'gpt-5') === 0) return false;      // exclude gpt-5
+        if (preg_match('/^o\d/i', $m)) return false;      // exclude o-series (o1, o3, etc.)
+        $allow_prefixes = array('gpt-4o', 'gpt-4.1', 'gpt-4-turbo', 'gpt-3.5-turbo');
+        foreach ($allow_prefixes as $p){
+            if (strpos($m, $p) === 0) return true;
+        }
         return false;
     }
 
@@ -509,7 +621,7 @@ class FVQA_Retriever {
                 'model'             => $model,
                 'instructions'      => (string)$system_prompt,
                 'input'             => (string)$user_prompt,
-                'max_output_tokens' => max(1, intval($gen['max_tokens'] ?? 800)), // brisk default
+                'max_output_tokens' => max(1, intval($gen['max_tokens'] ?? 800)),
             ];
             if ($this->model_supports_sampling_params($model)) {
                 if (isset($gen['temperature'])) $payload['temperature'] = floatval($gen['temperature']);
@@ -576,7 +688,7 @@ class FVQA_Retriever {
                 ['role'=>'system','content'=>(string)$system_prompt],
                 ['role'=>'user','content'=>(string)$user_prompt],
             ],
-            'max_tokens'  => max(1, intval($gen['max_tokens'] ?? 800)), // brisk default
+            'max_tokens'  => max(1, intval($gen['max_tokens'] ?? 800)),
         ];
         if (isset($gen['temperature'])) $payload['temperature'] = floatval($gen['temperature']);
         if (isset($gen['top_p']))       $payload['top_p']       = floatval($gen['top_p']);

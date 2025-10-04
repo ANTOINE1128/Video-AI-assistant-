@@ -32,6 +32,18 @@ class FVQA_REST {
                 )
             )
         ));
+
+        // NEW: warmup endpoint to pre-index and pre-compress notes
+        register_rest_route('fvqa/v1', '/warm', array(
+            array(
+                'methods'  => 'POST',
+                'callback' => array($this,'warm'),
+                'permission_callback' => '__return_true',
+                'args' => array(
+                    'video_id' => array('type'=>'string','required'=>true),
+                )
+            )
+        ));
     }
 
     /** Small helper: count chunks for a video id */
@@ -70,6 +82,40 @@ class FVQA_REST {
         }
     }
 
+    /** POST /fvqa/v1/warm: index (if needed) and precompute notes cache */
+    public function warm(\WP_REST_Request $req){
+        $o        = fvqa_get_settings();
+        $video_id = (string)($req->get_param('video_id') ?? '');
+
+        if ($video_id === '') {
+            return new \WP_REST_Response(array('ok'=>false,'error'=>'Missing video_id'), 400);
+        }
+
+        try {
+            $this->ensure_indexed_if_needed($video_id, $o);
+
+            if ( class_exists('FVQA_Retriever') ) {
+                // Use a fast map model for warmup; final compose uses your chosen model
+                $gen = array(
+                    'model'         => $o['openai_model'],
+                    'system_prompt' => $o['system_prompt'],
+                    'user_prompt'   => $o['user_prompt'],
+                    'temperature'   => $o['temperature'],
+                    'top_p'         => $o['top_p'],
+                    'max_tokens'    => min(800, intval($o['max_tokens'] ?? 1200)), // brisk for warm path
+                    'map_model'     => 'gpt-4.1-mini' // fast/cheap for compression
+                );
+                $rtv = new FVQA_Retriever($o['openai_key'], $o['similarity_threshold'], $o['max_chunks'], $gen);
+                $ok  = $rtv->warm($video_id);
+                return new \WP_REST_Response(array('ok'=>$ok ? true : false), 200);
+            }
+
+            return new \WP_REST_Response(array('ok'=>false,'error'=>'Retriever missing'), 500);
+        } catch (\Throwable $e) {
+            return new \WP_REST_Response(array('ok'=>false,'error'=>$e->getMessage()), 500);
+        }
+    }
+
     public function ask(\WP_REST_Request $req){
         $o = fvqa_get_settings();
         $question   = (string)($req->get_param('question') ?? '');
@@ -105,7 +151,7 @@ class FVQA_REST {
             }
         }
 
-        // ✅ NEW: auto-index this video if we have zero chunks
+        // Auto-index on first hit if needed
         try {
             if (!empty($video_id)) {
                 $this->ensure_indexed_if_needed($video_id, $o);

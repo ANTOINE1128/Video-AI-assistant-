@@ -3,6 +3,18 @@
   const cfg = window.FVQA_CFG || {};
   const $doc = $(document);
 
+  /* ---------- Viewport/Keyboard helpers (mobile) ---------- */
+  function setVH() {
+    // Use innerHeight to compute 1vh equivalent to avoid iOS URL bar issues
+    const vh = (window.visualViewport ? window.visualViewport.height : window.innerHeight) * 0.01;
+    document.documentElement.style.setProperty('--fvqa-vh', vh + 'px');
+  }
+  setVH();
+  window.addEventListener('resize', setVH);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', setVH);
+  }
+
   /* ---------- Vimeo ID detection ---------- */
   function detectVideoId(){
     const dataEl = document.querySelector('[data-vimeo-id]');
@@ -29,32 +41,26 @@
     return null;
   }
 
-  /** Robust extraction: understands “minute 12”, “in minute 10”, “12 min”, “12m”, “at 12:00”, etc. */
+  /** Robust extraction: time hints */
   function extractSeconds(s){
     if(!s) return null;
     s = (s+'').toLowerCase().trim();
 
-    // 1) H:MM:SS
     let m = s.match(/\b(\d{1,2}):(\d{2}):(\d{2})\b/);
     if (m) return parseInt(m[1],10)*3600 + parseInt(m[2],10)*60 + parseInt(m[3],10);
 
-    // 2) MM:SS
     m = s.match(/\b(\d{1,2}):(\d{2})\b/);
     if (m) return parseInt(m[1],10)*60 + parseInt(m[2],10);
 
-    // 3) “12 minutes”, “12 min”, “12m”, “12mins”
     m = s.match(/\b(\d{1,4})\s*(?:m|min|mins|minute|minutes)\b/);
     if (m) return parseInt(m[1],10) * 60;
 
-    // 4) “minute 12”, “in minute 10”, “at the minute 3”
     m = s.match(/\b(?:at|in|on)?\s*(?:the\s*)?(?:minute|min)\s+(\d{1,4})\b/);
     if (m) return parseInt(m[1],10) * 60;
 
-    // 5) Ordinals: “the 12th minute”
     m = s.match(/\b(?:the\s*)?(\d{1,4})(?:st|nd|rd|th)?\s+minute\b/);
     if (m) return parseInt(m[1],10) * 60;
 
-    // 6) Seconds forms
     m = s.match(/\b(\d{1,5})\s*s(?:ec|econds?)?\b/);
     if (m) return parseInt(m[1],10);
 
@@ -104,43 +110,98 @@
     return out;
   }
 
-  /* ---------- Markdown/HTML rendering (with graceful fallback) ---------- */
+  /* ---------- Quiz HTML coercion (safety net) ---------- */
+  function looksLikeQuizText(text){
+    const t = String(text || '');
+    if (/<\s*(h[1-6]|p|ul|ol|li|strong|em|blockquote|code)\b/i.test(t)) return false;
+    if (/\bQ\d+\./i.test(t)) return true;
+    if (/^\s*Answer\s*:/mi.test(t)) return true;
+    if (/^\s*Why\s*:/mi.test(t)) return true;
+    if (/^\s*(True|False)\s*$/mi.test(t)) return true;
+    if (/^\s*(Quick Check|Questions|Review Notes)\b/mi.test(t)) return true;
+    return false;
+  }
+  function coerceQuizHTML(text){
+    const src = String(text || '').replace(/\r\n?/g, '\n').trim();
+    const lines = src.split('\n');
+
+    let html = [];
+    let inUL = false;
+    let pbuf = [];
+
+    const flushP = () => {
+      if (pbuf.length){
+        const s = escapeHtml(pbuf.join(' ').trim());
+        if (s) html.push('<p>'+s+'</p>');
+        pbuf = [];
+      }
+    };
+    const startUL = () => { if (!inUL){ html.push('<ul>'); inUL=true; } };
+    const endUL   = () => { if (inUL){ html.push('</ul>'); inUL=false; } };
+
+    lines.forEach(rawLine => {
+      const line = rawLine.trim();
+      if (!line){ endUL(); flushP(); return; }
+
+      if (/^questions?$/i.test(line)) { endUL(); flushP(); html.push('<h3>Questions</h3>'); return; }
+      if (/^review notes?$/i.test(line)) { endUL(); flushP(); html.push('<h2>Review Notes</h2>'); return; }
+      if (/^q\d+\./i.test(line)) { endUL(); flushP(); html.push('<h4>'+escapeHtml(line)+'</h4>'); return; }
+
+      let m = line.match(/^([A-D])\)\s*(.+)$/);
+      if (m){ flushP(); startUL(); html.push('<li>'+escapeHtml(m[1]+') '+m[2])+'</li>'); return; }
+
+      if (/^(true|false)$/i.test(line)){ flushP(); startUL(); html.push('<li>'+escapeHtml(line.charAt(0).toUpperCase()+line.slice(1).toLowerCase())+'</li>'); return; }
+
+      m = line.match(/^answer\s*:\s*(.+)$/i);
+      if (m){ endUL(); flushP(); html.push('<p><strong>Answer:</strong> '+escapeHtml(m[1])+'</p>'); return; }
+
+      m = line.match(/^why\s*:\s*(.+)$/i);
+      if (m){ endUL(); flushP(); html.push('<p><em>Why:</em> '+escapeHtml(m[1])+'</p>'); return; }
+
+      pbuf.push(line);
+    });
+
+    endUL(); flushP();
+
+    if (!html.length){ return '<p>'+escapeHtml(src)+'</p>'; }
+    const joined = html.join('\n');
+    if (!/<h2[^>]*>.*Quick Check/i.test(joined) && /<h4>Q\d+\./i.test(joined)){
+      return '<h2>Quick Check</h2><p>Answer the questions below to test your understanding. Each question includes the correct answer and an explanation.</p>\n'+joined;
+    }
+    return joined;
+  }
+  function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
+  /* ---------- Markdown/HTML rendering ---------- */
   function renderMarkdownSafe(md){
     try {
-      const s = String(md || '');
-      const looksLikeHTML = /<\/?[a-z][\s\S]*>/i.test(s); // crude but effective
-
+      let s = String(md || '');
+      const looksLikeHTML = /<\/?[a-z][\s\S]*>/i.test(s);
       const haveDOMPurify = !!(window.DOMPurify && window.DOMPurify.sanitize);
       const haveMarked    = !!(window.marked && window.marked.parse);
 
-      let html;
+      if (!looksLikeHTML && looksLikeQuizText(s)) { s = coerceQuizHTML(s); }
 
-      if (looksLikeHTML) {
-        // Already HTML → just sanitize below
+      let html;
+      if (/<\s*(h[1-6]|p|ul|ol|li|strong|em|blockquote|code|span|small)\b/i.test(s)) {
         html = s;
       } else if (haveMarked) {
-        // Markdown → HTML
         html = window.marked.parse(s);
       } else {
-        // Plain fallback (no marked available)
         const esc = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         html = '<p>'+esc.replace(/\n{2,}/g,'</p><p>').replace(/\n/g,'<br>')+'</p>';
       }
 
       if (haveDOMPurify) {
         html = window.DOMPurify.sanitize(html, {
-          ALLOWED_TAGS: [
-            'h1','h2','h3','h4',
-            'p','ul','ol','li',
-            'strong','em','code','pre',
-            'blockquote','hr','a','br'
-          ],
+          ALLOWED_TAGS: ['h1','h2','h3','h4','p','ul','ol','li','strong','em','code','pre','blockquote','hr','a','br','span','small'],
           ALLOWED_ATTR: ['href','title','target','rel']
         });
       }
       return html;
     } catch (e) {
-      // Ultimate fallback: plain text
       return '<p>'+String(md || '').replace(/</g,'&lt;')+'</p>';
     }
   }
@@ -160,14 +221,9 @@
       data: JSON.stringify(buildPayload(payload))
     }).always(function(){ setThinking($root, false); })
       .done(function(res){
-        if (!res) {
-          addMessage($msgs, 'assistant', 'Sorry, empty response.');
-          return;
-        }
-        if (res.error) {
-          addMessage($msgs, 'assistant', 'Error: ' + res.error);
-          return;
-        }
+        if (!res) { addMessage($msgs, 'assistant', 'Sorry, empty response.'); return; }
+        if (res.error) { addMessage($msgs, 'assistant', 'Error: ' + res.error); return; }
+
         if (res.answer) {
           const html = renderMarkdownSafe(res.answer);
           addMessageHTML($msgs, 'assistant', html);
@@ -182,9 +238,7 @@
         }
 
         if (res.audio_url) {
-          const p = '<div class="fvqa-audio"><audio controls preload="none" src="'+
-                    String(res.audio_url).replace(/"/g,'&quot;') +
-                    '"></audio></div>';
+          const p = '<div class="fvqa-audio"><audio controls preload="none" src="'+ String(res.audio_url).replace(/"/g,'&quot;') +'"></audio></div>';
           addMessageHTML($msgs, 'assistant', p);
         } else if (res.audio_error) {
           addMessage($msgs, 'meta', 'Audio error: ' + res.audio_error);
@@ -213,11 +267,7 @@
     const secs = extractSeconds(q);
     addMessage($root.find('.fvqa-messages'), 'user', q);
 
-    const payload = {
-      question:  q,
-      mode:      'chat',
-      button_id: ''
-    };
+    const payload = { question: q, mode: 'chat', button_id: '' };
     if (secs !== null) payload.time_hint = secs;
 
     sendAsk($root, payload);
@@ -238,12 +288,7 @@
 
     addMessage($root.find('.fvqa-messages'), 'user', (q || '(no text)') + '  — ['+label+']');
 
-    const payload = {
-      question:   q,
-      mode:       'button',
-      button_id:  id,
-      want_audio: wantAudio
-    };
+    const payload = { question: q, mode: 'button', button_id: id, want_audio: wantAudio };
     if (secs !== null) payload.time_hint = secs;
 
     sendAsk($root, payload);
@@ -254,16 +299,31 @@
   $doc.on('click', '.fvqa-close', function(){
     const $root = widgetRoot();
     $root.addClass('fvqa-hidden');
+    $('html,body').removeClass('fvqa-no-scroll');
     syncBubble();
     setTimeout(()=>$('.fvqa-bubble').focus(), 0);
   });
 
-  // Fullscreen toggle
+  // Fullscreen toggle (true fullscreen + internal scroll + ESC to exit)
   $doc.on('click', '.fvqa-fullscreen', function(){
-    $(this).closest('.fvqa-widget').toggleClass('fvqa-fullscreen-on');
+    const $card = $(this).closest('.fvqa-widget');
+    $card.toggleClass('fvqa-fullscreen-on');
+    const isOn = $card.hasClass('fvqa-fullscreen-on');
+    $('html,body').toggleClass('fvqa-no-scroll', isOn);
+    if (isOn) setTimeout(()=> $card.find('.fvqa-text').trigger('focus'), 50);
   });
 
-  // Bubble click → restore
+  $doc.on('keydown', function(e){
+    if (e.key === 'Escape') {
+      const $card = $('.fvqa-widget.fvqa-fullscreen-on');
+      if ($card.length){
+        $card.removeClass('fvqa-fullscreen-on');
+        $('html,body').removeClass('fvqa-no-scroll');
+      }
+    }
+  });
+
+  // Reveal/restore
   $doc.on('click', '.fvqa-bubble', function(){
     const $root = widgetRoot();
     $root.removeClass('fvqa-hidden');
@@ -271,8 +331,16 @@
     setTimeout(()=>{ $root.find('.fvqa-text').trigger('focus'); }, 0);
   });
 
+  // Improve keyboard experience on mobile:
+  // scroll the input into view when focused
+  $doc.on('focus', '.fvqa-text', function(){
+    const $root = widgetRoot();
+    const $msgs = $root.find('.fvqa-messages');
+    setTimeout(()=>{ $msgs.scrollTop($msgs.prop('scrollHeight')); }, 100);
+  });
+
   $(function(){
-    ensureBubble(); syncBubble();
+    ensureBubble(); syncBubble(); setVH();
   });
 
 })(jQuery);
