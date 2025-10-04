@@ -10,9 +10,9 @@
     document.documentElement.style.setProperty('--fvqa-vh', vh + 'px');
   }
   setVH();
-  window.addEventListener('resize', setVH);
+  window.addEventListener('resize', function(){ setVH(); refreshAllInputSpaces(); });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', setVH);
+    window.visualViewport.addEventListener('resize', function(){ setVH(); refreshAllInputSpaces(); });
   }
 
   /* ---------- Vimeo ID detection ---------- */
@@ -85,19 +85,49 @@
   }
 
   function addMessage($box, role, text){
+    const $root = $box.closest('.fvqa-widget');
     const row = $('<div/>', {'class':'fvqa-msg fvqa-'+role}).text(text);
     $box.append(row);
-    $box.scrollTop($box.prop('scrollHeight'));
+    refreshInputSpace($root);
+    requestAnimationFrame(()=>{ $box.scrollTop($box.prop('scrollHeight')); });
   }
   function addMessageHTML($box, role, html){
+    const $root = $box.closest('.fvqa-widget');
     const row = $('<div/>', {'class':'fvqa-msg fvqa-'+role}).html(html);
     $box.append(row);
-    $box.scrollTop($box.prop('scrollHeight'));
+    refreshInputSpace($root);
+    requestAnimationFrame(()=>{ $box.scrollTop($box.prop('scrollHeight')); });
   }
 
   function setThinking($root, on){
     const $thinking = $root.find('.fvqa-thinking');
     if (on) $thinking.removeAttr('hidden'); else $thinking.attr('hidden', true);
+    refreshInputSpace($root);
+  }
+
+  function refreshInputSpace($root){
+    if (!$root || !$root.length) return;
+    const $input = $root.find('.fvqa-input');
+    if (!$input.length) return;
+    const height = Math.round($input.outerHeight(true) || 0);
+    if (!height) return;
+    const gap = Math.max(height + 18, 72);
+    $root.get(0).style.setProperty('--fvqa-input-space', gap + 'px');
+  }
+
+  function setBusy($root, on){
+    const $controls = $root.find('.fvqa-action-btn, .fvqa-send');
+    $root.toggleClass('fvqa-busy', !!on);
+    if (on) {
+      $controls.prop('disabled', true).attr('aria-disabled', 'true');
+    } else {
+      $controls.prop('disabled', false).removeAttr('disabled').removeAttr('aria-disabled');
+    }
+    refreshInputSpace($root);
+  }
+
+  function refreshAllInputSpaces(){
+    $('.fvqa-widget').each(function(){ refreshInputSpace($(this)); });
   }
 
   function buildPayload(base){
@@ -210,6 +240,7 @@
   function sendAsk($root, payload){
     const $msgs = $root.find('.fvqa-messages');
     setThinking($root, true);
+    setBusy($root, true);
 
     payload.video_id = payload.video_id || detectVideoId();
 
@@ -219,7 +250,10 @@
       headers: { 'X-WP-Nonce': (cfg.rest && cfg.rest.nonce) ? cfg.rest.nonce : '' },
       contentType: 'application/json',
       data: JSON.stringify(buildPayload(payload))
-    }).always(function(){ setThinking($root, false); })
+    }).always(function(){
+        setThinking($root, false);
+        setBusy($root, false);
+      })
       .done(function(res){
         if (!res) { addMessage($msgs, 'assistant', 'Sorry, empty response.'); return; }
         if (res.error) { addMessage($msgs, 'assistant', 'Error: ' + res.error); return; }
@@ -259,7 +293,8 @@
   // Send message (chat mode)
   $doc.on('click', '.fvqa-send', function(e){
     e.preventDefault();
-    const $root = widgetRoot();
+    const $root = $(this).closest('.fvqa-widget');
+    if ($root.hasClass('fvqa-busy')) return;
     const $text = $root.find('.fvqa-text');
     const q = $text.val().trim();
     if (!q) return;
@@ -279,6 +314,7 @@
     e.preventDefault();
     const $btn  = $(this);
     const $root = $btn.closest('.fvqa-widget');
+    if ($root.hasClass('fvqa-busy')) return;
     const $text = $root.find('.fvqa-text');
     const q = $text.val().trim();
     const secs = extractSeconds(q);
@@ -334,13 +370,19 @@
   // Improve keyboard experience on mobile:
   // scroll the input into view when focused
   $doc.on('focus', '.fvqa-text', function(){
-    const $root = widgetRoot();
+    const $root = $(this).closest('.fvqa-widget');
     const $msgs = $root.find('.fvqa-messages');
-    setTimeout(()=>{ $msgs.scrollTop($msgs.prop('scrollHeight')); }, 100);
+    setTimeout(()=>{
+      refreshInputSpace($root);
+      $msgs.scrollTop($msgs.prop('scrollHeight'));
+    }, 100);
   });
 
+  $doc.on('input', '.fvqa-text', function(){ refreshInputSpace($(this).closest('.fvqa-widget')); });
+  $doc.on('mouseup', '.fvqa-text', function(){ setTimeout(()=> refreshInputSpace($(this).closest('.fvqa-widget')), 50); });
+
   $(function(){
-    ensureBubble(); syncBubble(); setVH();
+    ensureBubble(); syncBubble(); setVH(); refreshAllInputSpaces();
   });
 
 })(jQuery);

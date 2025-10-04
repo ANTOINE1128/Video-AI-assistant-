@@ -23,6 +23,7 @@
   --fvqa-edge-gap: 18px;
   --fvqa-header-h: 58px;
   --fvqa-send-bg: linear-gradient(135deg, #54b3ff, #3673ff);
+  --fvqa-input-space: 96px;
 }
 
 .fvqa-widget{
@@ -32,6 +33,7 @@
   bottom: calc(var(--fvqa-edge-gap) + 56px);
   width: clamp(280px, 32vw, 420px);
   max-width: calc(100vw - (var(--fvqa-edge-gap) * 2));
+  height: clamp(420px, 72vh, 640px);
   max-height: calc(100vh - (var(--fvqa-edge-gap) * 2));
   display: flex;
   flex-direction: column;
@@ -118,24 +120,39 @@
 
 .fvqa-header-btns .fvqa-btn::before{
   content: "";
-  display: block;
-  width: 18px;
-  height: 18px;
-  color: currentColor;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 
-.fvqa-header-btns .fvqa-close::before{
-  content: "×";
-  font-size: 18px;
-  line-height: 1;
-  font-family: "Segoe UI Symbol", "Helvetica Neue", Arial, sans-serif;
+.fvqa-header-btns .fvqa-close::before,
+.fvqa-header-btns .fvqa-close::after{
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
 }
+
+.fvqa-header-btns .fvqa-close::before{ transform: translate(-50%, -50%) rotate(45deg); }
+.fvqa-header-btns .fvqa-close::after{ transform: translate(-50%, -50%) rotate(-45deg); }
 
 .fvqa-header-btns .fvqa-fullscreen::before{
-  content: "⤢";
-  font-size: 20px;
-  line-height: 1;
-  font-family: "Segoe UI Symbol", "Helvetica Neue", Arial, sans-serif;
+  width: 20px;
+  height: 20px;
+  background:
+    linear-gradient(currentColor, currentColor) left top/12px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) left top/2px 12px no-repeat,
+    linear-gradient(currentColor, currentColor) right top/12px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) right top/2px 12px no-repeat,
+    linear-gradient(currentColor, currentColor) left bottom/12px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) left bottom/2px 12px no-repeat,
+    linear-gradient(currentColor, currentColor) right bottom/12px 2px no-repeat,
+    linear-gradient(currentColor, currentColor) right bottom/2px 12px no-repeat;
 }
 
 .fvqa-header-btns .fvqa-btn:hover{
@@ -157,6 +174,7 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 320px;
+  overflow: hidden;
   background: linear-gradient(180deg, rgba(12,22,40,.85), rgba(8,14,28,.95));
 }
 
@@ -191,14 +209,22 @@
   outline-offset: 2px;
 }
 
+.fvqa-busy .fvqa-action-btn,
+.fvqa-busy .fvqa-send{
+  pointer-events: none;
+  opacity: .55;
+  cursor: not-allowed;
+}
+
 .fvqa-messages{
   flex: 1 1 auto;
   min-height: 0;
-  padding: 14px 16px;
+  padding: 14px 16px calc(14px + var(--fvqa-input-space, 96px)) 16px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  scroll-padding-bottom: calc(14px + var(--fvqa-input-space, 96px));
 }
 
 .fvqa-msg{
@@ -343,7 +369,7 @@
   padding: 0 20px;
   border-radius: 999px;
   border: 1px solid rgba(120,162,255,.35);
-  background: linear-gradient(135deg, rgba(77,166,255,.9), rgba(34,211,238,.85));
+  background: linear-gradient(135deg, rgba(4, 2, 126, 0.9), rgba(22, 151, 190, 0.85));
   color: #fff;
   cursor: pointer;
   box-shadow: 0 18px 40px rgba(34,120,255,.35);
@@ -353,7 +379,7 @@
 .fvqa-bubble.show{ display: inline-flex; }
 
 .fvqa-bubble:focus-visible{
-  outline: 2px solid rgba(34,211,238,.8);
+  outline: 2px solid rgba(8, 64, 218, 0.8);
   outline-offset: 2px;
 }
 
