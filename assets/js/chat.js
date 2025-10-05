@@ -10,9 +10,9 @@
     document.documentElement.style.setProperty('--fvqa-vh', vh + 'px');
   }
   setVH();
-  window.addEventListener('resize', function(){ setVH(); refreshAllInputSpaces(); });
+  window.addEventListener('resize', setVH);
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', function(){ setVH(); refreshAllInputSpaces(); });
+    window.visualViewport.addEventListener('resize', setVH);
   }
 
   /* ---------- Vimeo ID detection ---------- */
@@ -370,19 +370,13 @@
   // Improve keyboard experience on mobile:
   // scroll the input into view when focused
   $doc.on('focus', '.fvqa-text', function(){
-    const $root = $(this).closest('.fvqa-widget');
+    const $root = widgetRoot();
     const $msgs = $root.find('.fvqa-messages');
-    setTimeout(()=>{
-      refreshInputSpace($root);
-      $msgs.scrollTop($msgs.prop('scrollHeight'));
-    }, 100);
+    setTimeout(()=>{ $msgs.scrollTop($msgs.prop('scrollHeight')); }, 100);
   });
 
-  $doc.on('input', '.fvqa-text', function(){ refreshInputSpace($(this).closest('.fvqa-widget')); });
-  $doc.on('mouseup', '.fvqa-text', function(){ setTimeout(()=> refreshInputSpace($(this).closest('.fvqa-widget')), 50); });
-
   $(function(){
-    ensureBubble(); syncBubble(); setVH(); refreshAllInputSpaces();
+    ensureBubble(); syncBubble(); setVH();
   });
 
 })(jQuery);

@@ -2,9 +2,7 @@
 if ( ! defined('ABSPATH') ) { exit; }
 
 class FVQA_REST {
-    public function __construct(){
-        add_action('rest_api_init', array($this,'routes'));
-    }
+    public function __construct(){ add_action('rest_api_init', array($this,'routes')); }
 
     public function routes(){
         register_rest_route('fvqa/v1', '/ask', array(
@@ -19,11 +17,7 @@ class FVQA_REST {
                     'video_id' => array('type'=>'string','required'=>false),
                     'time_hint'=> array(
                         'required'=>false,
-                        'validate_callback'=> function($v){
-                            if ($v === null) return true;
-                            if ($v === '') return true;
-                            return is_numeric($v) && intval($v) >= 0;
-                        }
+                        'validate_callback'=> function($v){ if ($v === null || $v === '') return true; return is_numeric($v) && intval($v) >= 0; }
                     ),
                     'want_audio'=> array(
                         'required'=>false,
@@ -33,41 +27,40 @@ class FVQA_REST {
             )
         ));
 
-        // NEW: warmup endpoint to pre-index and pre-compress notes
         register_rest_route('fvqa/v1', '/warm', array(
             array(
                 'methods'  => 'POST',
                 'callback' => array($this,'warm'),
                 'permission_callback' => '__return_true',
-                'args' => array(
-                    'video_id' => array('type'=>'string','required'=>true),
-                )
+                'args' => array('video_id' => array('type'=>'string','required'=>true))
+            )
+        ));
+
+        // Diagnostics: check chunk count and a few rows
+        register_rest_route('fvqa/v1', '/chunks', array(
+            array(
+                'methods'  => 'GET',
+                'callback' => array($this,'chunks'),
+                'permission_callback' => '__return_true',
+                'args' => array('video_id' => array('type'=>'string','required'=>true))
             )
         ));
     }
 
-    /** Small helper: count chunks for a video id */
     private function chunks_count($video_id){
-        global $wpdb;
-        if (!$video_id) return 0;
+        global $wpdb; if (!$video_id) return 0;
         $table = $wpdb->prefix.'fvqa_chunks';
         return intval( $wpdb->get_var( $wpdb->prepare("SELECT COUNT(*) FROM $table WHERE video_id=%s", $video_id) ) );
     }
 
-    /** Try to ensure video is indexed (with a transient lock to avoid races) */
     private function ensure_indexed_if_needed($video_id, $options){
         if (!$video_id) return;
-
         $have = $this->chunks_count($video_id);
         if ($have > 0) return;
 
-        // Prevent concurrent indexing storms if multiple students click at once
         $lock_key = 'fvqa_indexing_lock_'.$video_id;
-        if ( get_transient($lock_key) ) {
-            // Someone else is indexing. Give it a moment to finish on next request.
-            return;
-        }
-        set_transient($lock_key, 1, 60); // lock for 60s
+        if ( get_transient($lock_key) ) return;
+        set_transient($lock_key, 1, 60);
 
         try {
             if ( class_exists('FVQA_Indexer') ) {
@@ -75,42 +68,62 @@ class FVQA_REST {
                 $idx->ensure_indexed($video_id);
             }
         } catch (\Throwable $e) {
-            // Log but don't fatal the request; retrieval may still succeed if chunks appear later.
             error_log('[FVQA] Indexing failed for video '.$video_id.' : '.$e->getMessage());
         } finally {
             delete_transient($lock_key);
         }
     }
 
-    /** POST /fvqa/v1/warm: index (if needed) and precompute notes cache */
+    public function chunks(\WP_REST_Request $req){
+        global $wpdb;
+        $video_id = (string)$req->get_param('video_id');
+        $table = $wpdb->prefix.'fvqa_chunks';
+        $count = $this->chunks_count($video_id);
+        $sample = $wpdb->get_results( $wpdb->prepare(
+            "SELECT start_sec, end_sec, LEFT(text, 160) AS text FROM $table WHERE video_id=%s ORDER BY start_sec ASC LIMIT 3",
+            $video_id
+        ), ARRAY_A ) ?: [];
+        return new \WP_REST_Response(array(
+            'video_id'=>$video_id,'count'=>$count,'sample'=>$sample
+        ), 200);
+    }
+
     public function warm(\WP_REST_Request $req){
         $o        = fvqa_get_settings();
         $video_id = (string)($req->get_param('video_id') ?? '');
-
-        if ($video_id === '') {
-            return new \WP_REST_Response(array('ok'=>false,'error'=>'Missing video_id'), 400);
-        }
+        if ($video_id === '') return new \WP_REST_Response(array('ok'=>false,'error'=>'Missing video_id'), 400);
 
         try {
+            $before = $this->chunks_count($video_id);
             $this->ensure_indexed_if_needed($video_id, $o);
+            $after  = $this->chunks_count($video_id);
 
-            if ( class_exists('FVQA_Retriever') ) {
-                // Use a fast map model for warmup; final compose uses your chosen model
+            $notes_status = 'skipped';
+            if ( class_exists('FVQA_Retriever') && $after > 0 ) {
                 $gen = array(
                     'model'         => $o['openai_model'],
                     'system_prompt' => $o['system_prompt'],
                     'user_prompt'   => $o['user_prompt'],
                     'temperature'   => $o['temperature'],
                     'top_p'         => $o['top_p'],
-                    'max_tokens'    => min(800, intval($o['max_tokens'] ?? 1200)), // brisk for warm path
-                    'map_model'     => 'gpt-4.1-mini' // fast/cheap for compression
+                    'max_tokens'    => min(800, intval($o['max_tokens'] ?? 1200)),
+                    'map_model'     => 'gpt-4.1-mini'
                 );
                 $rtv = new FVQA_Retriever($o['openai_key'], $o['similarity_threshold'], $o['max_chunks'], $gen);
-                $ok  = $rtv->warm($video_id);
-                return new \WP_REST_Response(array('ok'=>$ok ? true : false), 200);
+                $notes_status = $rtv->warm($video_id) ? 'cached' : 'no-notes';
             }
 
-            return new \WP_REST_Response(array('ok'=>false,'error'=>'Retriever missing'), 500);
+            if ($after <= 0) {
+                return new \WP_REST_Response(array(
+                    'ok'=>false,
+                    'error'=>'No transcript chunks found for this video. Confirm the video has an active captions/subtitles track and that your Vimeo token can read it.',
+                    'before'=>$before,'after'=>$after,'notes_cache'=>$notes_status
+                ), 200);
+            }
+
+            return new \WP_REST_Response(array(
+                'ok'=>true,'before'=>$before,'after'=>$after,'notes_cache'=>$notes_status
+            ), 200);
         } catch (\Throwable $e) {
             return new \WP_REST_Response(array('ok'=>false,'error'=>$e->getMessage()), 500);
         }
@@ -124,11 +137,8 @@ class FVQA_REST {
         $video_id   = (string)($req->get_param('video_id') ?? '');
         $time_hint  = $req->get_param('time_hint');
         $want_audio = $req->get_param('want_audio');
+        if ($time_hint === '' || $time_hint === null) $time_hint = null; else $time_hint = intval($time_hint);
 
-        if ($time_hint === '' || $time_hint === null) $time_hint = null;
-        else $time_hint = intval($time_hint);
-
-        // Build generation profile
         $gen = array(
             'model'        => $o['openai_model'],
             'system_prompt'=> $o['system_prompt'],
@@ -138,7 +148,6 @@ class FVQA_REST {
             'max_tokens'   => $o['max_tokens']
         );
 
-        // If it's a button click, override prompts & model from that button
         if ($mode === 'button' && !empty($button_id) && !empty($o['action_buttons']) && is_array($o['action_buttons'])){
             foreach($o['action_buttons'] as $btn){
                 if (!empty($btn['id']) && $btn['id'] === $button_id){
@@ -151,47 +160,29 @@ class FVQA_REST {
             }
         }
 
-        // Auto-index on first hit if needed
-        try {
-            if (!empty($video_id)) {
-                $this->ensure_indexed_if_needed($video_id, $o);
-            }
-        } catch(\Throwable $e){
-            // Don't hard fail; proceed to retrieval with whatever we have
-            error_log('[FVQA] ensure_indexed_if_needed error for '.$video_id.': '.$e->getMessage());
-        }
+        try { if (!empty($video_id)) $this->ensure_indexed_if_needed($video_id, $o); } catch(\Throwable $e){ error_log('[FVQA] ensure_indexed_if_needed error: '.$e->getMessage()); }
 
         try {
             $rtv = new FVQA_Retriever($o['openai_key'], $o['similarity_threshold'], $o['max_chunks'], $gen);
             $res = $rtv->answer($video_id, $question, $time_hint);
-        } catch(\Throwable $e){
-            return new \WP_REST_Response(array('error'=>'Server error: '.$e->getMessage()), 500);
-        }
+        } catch(\Throwable $e){ return new \WP_REST_Response(array('error'=>'Server error: '.$e->getMessage()), 500); }
 
         $answer_text = (string)($res['answer'] ?? '');
         $sources     = $res['sources'] ?? array();
 
-        // If still empty, add a useful hint in debug mode
         if ($answer_text === '' || $answer_text === "I couldn't find that in this video.") {
             $cnt = !empty($video_id) ? $this->chunks_count($video_id) : -1;
-            if (!empty($o['debug_logs'])) {
-                error_log("[FVQA] Retrieval says 'not found'. video_id={$video_id} chunks={$cnt} q='".substr($question,0,120)."'");
-            }
+            $msg = "[FVQA] not-found. video_id={$video_id} chunks={$cnt} q='".substr($question,0,120)."'";
+            if (!empty($o['debug_logs'])) error_log($msg);
         }
 
         $out = array('answer'=>$answer_text, 'sources'=>$sources);
-
         if ($want_audio && $answer_text !== '' && stripos($answer_text,'Error:') !== 0){
             $tts = fvqa_tts_synthesize($o['openai_key'], $answer_text, $o['tts_voice'], $o['tts_model']);
-            if (is_wp_error($tts)){
-                $out['audio_error'] = $tts->get_error_message();
-            } else {
-                $out['audio_url'] = $tts['url'];
-            }
+            if (is_wp_error($tts)) { $out['audio_error'] = $tts->get_error_message(); }
+            else { $out['audio_url'] = $tts['url']; }
         }
-
         return new \WP_REST_Response($out, 200);
     }
 }
-
 new FVQA_REST();
