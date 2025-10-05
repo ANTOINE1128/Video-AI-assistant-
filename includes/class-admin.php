@@ -9,7 +9,7 @@ class FVQA_Admin {
     }
 
     public function menu(){
-        add_menu_page('Farhat Video Q&A','Farhat Q&A','manage_options','farhat-video-qa',[$this,'render'],'dashicons-format-chat',59);
+        add_menu_page('Farhat Video Q&A','Farhat.AI','manage_options','farhat-video-qa',[$this,'render'],'dashicons-format-chat',59);
     }
 
     public function assets($hook){

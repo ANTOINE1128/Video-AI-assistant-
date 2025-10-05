@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: Farhat Video Q&A
+ * Plugin Name: Farhat Video AI
  * Description: Per-video Q&A for Farhat Lectures using Vimeo captions and OpenAI.
  * Version: 1.9.8
  * Author: Antoine Makdessy
@@ -73,7 +73,7 @@ function fvqa_render_widget() {
     <!-- Added theme class: fvqa-theme--farhat (CSS-only hook) -->
     <div class="fvqa-widget fvqa-theme--farhat" aria-live="polite">
       <div class="fvqa-header">
-        <div class="fvqa-title">Farhat Q&amp;A</div>
+        <div class="fvqa-title">Farhat.AI</div>
         <div class="fvqa-header-btns">
           <button type="button" class="fvqa-btn fvqa-fullscreen" aria-label="Toggle fullscreen">⤢</button>
           <button type="button" class="fvqa-btn fvqa-close" aria-label="Minimize">×</button>
