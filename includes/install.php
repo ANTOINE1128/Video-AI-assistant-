@@ -2,22 +2,51 @@
 if ( ! defined('ABSPATH') ) { exit; }
 
 class FVQA_Install {
-    public static function install(){ self::maybe_install(); }
 
-    public static function maybe_install(){
+    /** Public: call on activation */
+    public static function install(){
+        self::maybe_install(true);
+    }
+
+    /**
+     * Create/repair tables if missing.
+     * @param bool $verbose  when true, return an array with status & errors instead of void.
+     *                       Used by the REST repair endpoint.
+     */
+    public static function maybe_install($verbose = false){
         global $wpdb;
-        $chunks = $wpdb->prefix.'fvqa_chunks';
-        $logs   = $wpdb->prefix.'fvqa_logs';
 
-        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $wpdb->esc_like($chunks)) );
-        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $wpdb->esc_like($logs))   );
+        $out = array(
+            'prefix'          => $wpdb->prefix,
+            'chunks_table'    => $wpdb->prefix.'fvqa_chunks',
+            'logs_table'      => $wpdb->prefix.'fvqa_logs',
+            'charset_collate' => '',
+            'created'         => array(),
+            'errors'          => array(),
+        );
 
-        if ($have_chunks === $chunks && $have_logs === $logs) return;
+        $chunks = $out['chunks_table'];
+        $logs   = $out['logs_table'];
 
-        require_once ABSPATH.'wp-admin/includes/upgrade.php';
+        // Detect presence
+        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
+        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
+
+        // If both exist, we’re done early (unless verbose mode wants to report)
+        if ( $have_chunks === $chunks && $have_logs === $logs ) {
+            if ($verbose) {
+                $out['created'] = array();
+                return $out;
+            }
+            return;
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         $charset_collate = $wpdb->get_charset_collate();
+        $out['charset_collate'] = $charset_collate;
 
-        $sql1 = "CREATE TABLE $chunks (
+        // Primary DDL via dbDelta (handles diffs too)
+        $sql_chunks = "CREATE TABLE {$chunks} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             video_id VARCHAR(20) NOT NULL,
             start_sec INT UNSIGNED NOT NULL,
@@ -27,9 +56,9 @@ class FVQA_Install {
             PRIMARY KEY (id),
             KEY vid_idx (video_id),
             KEY time_idx (video_id, start_sec)
-        ) $charset_collate;";
+        ) {$charset_collate};";
 
-        $sql2 = "CREATE TABLE $logs (
+        $sql_logs = "CREATE TABLE {$logs} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             video_id VARCHAR(20) NOT NULL,
             user_id BIGINT UNSIGNED NULL,
@@ -38,9 +67,65 @@ class FVQA_Install {
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
             KEY vidlog_idx (video_id, created_at)
-        ) $charset_collate;";
+        ) {$charset_collate};";
 
-        dbDelta($sql1);
-        dbDelta($sql2);
+        // Capture errors
+        $wpdb->suppress_errors(false);
+
+        try {
+            dbDelta($sql_chunks);
+            dbDelta($sql_logs);
+        } catch (\Throwable $e) {
+            $out['errors'][] = 'dbDelta throw: '.$e->getMessage();
+        }
+
+        // Recheck existence
+        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
+        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
+
+        // Fallback: direct CREATE TABLE IF NOT EXISTS (some hosts disable dbDelta diffs)
+        if ( $have_chunks !== $chunks ) {
+            $fallback = "CREATE TABLE IF NOT EXISTS {$chunks} (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                video_id VARCHAR(20) NOT NULL,
+                start_sec INT UNSIGNED NOT NULL,
+                end_sec INT UNSIGNED NOT NULL,
+                text LONGTEXT NOT NULL,
+                embedding LONGTEXT NULL,
+                PRIMARY KEY (id),
+                KEY vid_idx (video_id),
+                KEY time_idx (video_id, start_sec)
+            ) {$charset_collate};";
+            $r = $wpdb->query($fallback);
+            if ($r === false) $out['errors'][] = 'Chunks fallback error: '.$wpdb->last_error;
+            else $out['created'][] = 'fvqa_chunks';
+        }
+
+        if ( $have_logs !== $logs ) {
+            $fallback = "CREATE TABLE IF NOT EXISTS {$logs} (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                video_id VARCHAR(20) NOT NULL,
+                user_id BIGINT UNSIGNED NULL,
+                question LONGTEXT NOT NULL,
+                answer LONGTEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY vidlog_idx (video_id, created_at)
+            ) {$charset_collate};";
+            $r = $wpdb->query($fallback);
+            if ($r === false) $out['errors'][] = 'Logs fallback error: '.$wpdb->last_error;
+            else $out['created'][] = 'fvqa_logs';
+        }
+
+        // Final verify
+        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
+        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
+
+        if ($verbose) {
+            $out['final_chunks_ok'] = ($have_chunks === $chunks);
+            $out['final_logs_ok']   = ($have_logs === $logs);
+            $out['db_last_error']   = $wpdb->last_error;
+            return $out;
+        }
     }
 }

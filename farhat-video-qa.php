@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Farhat Video AI
  * Description: Per-video Q&A for Farhat Lectures using Vimeo captions and OpenAI.
- * Version: 1.9.8
+ * Version: 1.9.9
  * Author: Antoine Makdessy
  */
 

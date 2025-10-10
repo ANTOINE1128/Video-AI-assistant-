@@ -15,6 +15,12 @@
     window.visualViewport.addEventListener('resize', setVH);
   }
 
+  /* ---------- Mobile detection ---------- */
+  function isMobile(){
+    // Match your CSS breakpoint for phones
+    return window.matchMedia && window.matchMedia('(max-width: 600px)').matches;
+  }
+
   /* ---------- Vimeo ID detection ---------- */
   function detectVideoId(){
     const dataEl = document.querySelector('[data-vimeo-id]');
@@ -315,6 +321,19 @@
     const $btn  = $(this);
     const $root = $btn.closest('.fvqa-widget');
     if ($root.hasClass('fvqa-busy')) return;
+
+    // On mobile: ensure widget is visible and fullscreen before sending
+    if (isMobile()){
+      if ($root.hasClass('fvqa-hidden')) {
+        $root.removeClass('fvqa-hidden');
+        syncBubble();
+      }
+      if (!$root.hasClass('fvqa-fullscreen-on')) {
+        $root.addClass('fvqa-fullscreen-on');
+        $('html,body').addClass('fvqa-no-scroll');
+      }
+    }
+
     const $text = $root.find('.fvqa-text');
     const q = $text.val().trim();
     const secs = extractSeconds(q);
@@ -334,7 +353,7 @@
   // Close → minimize
   $doc.on('click', '.fvqa-close', function(){
     const $root = widgetRoot();
-    $root.addClass('fvqa-hidden');
+    $root.addClass('fvqa-hidden').removeClass('fvqa-fullscreen-on');
     $('html,body').removeClass('fvqa-no-scroll');
     syncBubble();
     setTimeout(()=>$('.fvqa-bubble').focus(), 0);
@@ -359,10 +378,15 @@
     }
   });
 
-  // Reveal/restore
+  // Reveal/restore from bubble
   $doc.on('click', '.fvqa-bubble', function(){
     const $root = widgetRoot();
     $root.removeClass('fvqa-hidden');
+    // On mobile, open directly in fullscreen when bubble is tapped
+    if (isMobile()){
+      $root.addClass('fvqa-fullscreen-on');
+      $('html,body').addClass('fvqa-no-scroll');
+    }
     syncBubble();
     setTimeout(()=>{ $root.find('.fvqa-text').trigger('focus'); }, 0);
   });
@@ -376,7 +400,19 @@
   });
 
   $(function(){
-    ensureBubble(); syncBubble(); setVH();
+    // Ensure bubble exists
+    ensureBubble();
+
+    // Initial open behavior:
+    // - Desktop/tablet: keep current default (widget shown if theme prints it)
+    // - Mobile (<=600px): start minimized (hidden), bubble visible
+    const $root = widgetRoot();
+    if (isMobile()){
+      $root.addClass('fvqa-hidden').removeClass('fvqa-fullscreen-on');
+      $('html,body').removeClass('fvqa-no-scroll');
+    }
+    syncBubble();
+    setVH();
   });
 
 })(jQuery);
