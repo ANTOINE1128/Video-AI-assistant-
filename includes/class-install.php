@@ -11,7 +11,6 @@ class FVQA_Install {
     /**
      * Create/repair tables if missing.
      * @param bool $verbose  when true, return an array with status & errors instead of void.
-     *                       Used by the REST repair endpoint.
      */
     public static function maybe_install($verbose = false){
         global $wpdb;
@@ -32,12 +31,8 @@ class FVQA_Install {
         $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
         $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
 
-        // If both exist, we’re done early (unless verbose mode wants to report)
         if ( $have_chunks === $chunks && $have_logs === $logs ) {
-            if ($verbose) {
-                $out['created'] = array();
-                return $out;
-            }
+            if ($verbose) { $out['created'] = array(); return $out; }
             return;
         }
 
@@ -45,7 +40,6 @@ class FVQA_Install {
         $charset_collate = $wpdb->get_charset_collate();
         $out['charset_collate'] = $charset_collate;
 
-        // Primary DDL via dbDelta (handles diffs too)
         $sql_chunks = "CREATE TABLE {$chunks} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             video_id VARCHAR(20) NOT NULL,
@@ -69,21 +63,16 @@ class FVQA_Install {
             KEY vidlog_idx (video_id, created_at)
         ) {$charset_collate};";
 
-        // Capture errors
         $wpdb->suppress_errors(false);
 
-        try {
-            dbDelta($sql_chunks);
-            dbDelta($sql_logs);
-        } catch (\Throwable $e) {
-            $out['errors'][] = 'dbDelta throw: '.$e->getMessage();
-        }
+        try { dbDelta($sql_chunks); dbDelta($sql_logs); }
+        catch (\Throwable $e) { $out['errors'][] = 'dbDelta throw: '.$e->getMessage(); }
 
         // Recheck existence
         $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
         $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
 
-        // Fallback: direct CREATE TABLE IF NOT EXISTS (some hosts disable dbDelta diffs)
+        // Fallback: direct CREATE TABLE IF NOT EXISTS
         if ( $have_chunks !== $chunks ) {
             $fallback = "CREATE TABLE IF NOT EXISTS {$chunks} (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -117,13 +106,9 @@ class FVQA_Install {
             else $out['created'][] = 'fvqa_logs';
         }
 
-        // Final verify
-        $have_chunks = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) );
-        $have_logs   = $wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) );
-
         if ($verbose) {
-            $out['final_chunks_ok'] = ($have_chunks === $chunks);
-            $out['final_logs_ok']   = ($have_logs === $logs);
+            $out['final_chunks_ok'] = ($wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $chunks) ) === $chunks);
+            $out['final_logs_ok']   = ($wpdb->get_var( $wpdb->prepare("SHOW TABLES LIKE %s", $logs) ) === $logs);
             $out['db_last_error']   = $wpdb->last_error;
             return $out;
         }

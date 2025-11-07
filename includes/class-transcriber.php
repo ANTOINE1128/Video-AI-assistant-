@@ -92,7 +92,7 @@ class FVQA_Transcriber {
             'headers' => $headers,
             'body'    => $body,
             'timeout' => 180,
-        ), 2, 1200 );
+        ), 2 ); // <-- fixed: removed invalid 5th argument
 
         if ( is_wp_error( $res ) ) return $res;
 

@@ -8,7 +8,7 @@
 
 if ( ! defined('ABSPATH') ) { exit; }
 
-define('FVQA_VERSION', '1.9.6');
+define('FVQA_VERSION', '1.9.9');
 define('FVQA_PATH', plugin_dir_path(__FILE__));
 define('FVQA_URL',  plugin_dir_url(__FILE__));
 
@@ -23,6 +23,8 @@ foreach ([
     'includes/class-indexer.php',
     'includes/class-retriever.php',
     'includes/class-logger.php',
+    'includes/class-vimeo-client.php',
+    'includes/class-transcriber.php',
 ] as $rel) {
     $abs = FVQA_PATH.$rel;
     if ( file_exists($abs) ) require_once $abs;
@@ -51,15 +53,43 @@ function fvqa_is_topic_page() {
 function fvqa_enqueue_front() {
     if ( ! fvqa_is_topic_page() ) return;
 
+    // Styles
     wp_enqueue_style('fvqa-chat', FVQA_URL.'assets/css/chat.css', [], FVQA_VERSION);
-    wp_enqueue_script('jquery');
-    wp_enqueue_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', ['jquery'], FVQA_VERSION, true);
 
-    $rest = [
-        'url'   => esc_url_raw( rest_url('fvqa/v1/ask') ),
-        'nonce' => wp_create_nonce('wp_rest'),
-    ];
-    wp_localize_script('fvqa-chat', 'FVQA_CFG', ['rest'=>$rest]);
+    // Scripts (register dependencies then main)
+    wp_register_script('fvqa-marked',    FVQA_URL.'assets/js/marked.min.js', [], '12.0.0', true);
+    wp_register_script('fvqa-dompurify', FVQA_URL.'assets/js/purify.min.js', [], '3.0.6',  true);
+
+    wp_enqueue_script('jquery');
+    wp_enqueue_script('fvqa-marked');
+    wp_enqueue_script('fvqa-dompurify');
+    wp_enqueue_script('fvqa-chat', FVQA_URL.'assets/js/chat.js', ['jquery','fvqa-marked','fvqa-dompurify'], FVQA_VERSION, true);
+
+    // Localize runtime config (UI strings + quick actions)
+    $opt = function_exists('fvqa_get_settings') ? fvqa_get_settings() : [];
+    $buttons = is_array($opt['action_buttons'] ?? null) ? $opt['action_buttons'] : [];
+
+    wp_localize_script('fvqa-chat', 'FVQA_CFG', [
+        'rest' => [
+            'url'   => esc_url_raw( rest_url('fvqa/v1/ask') ),
+            'nonce' => wp_create_nonce('wp_rest'),
+        ],
+        'ui' => [
+            'title'      => 'Ask about this video',
+            'thinking'   => isset($opt['thinking_text']) ? $opt['thinking_text'] : 'Thinking…',
+            'sendLabel'  => 'Send',
+            'fullscreen' => 'Fullscreen',
+            'close'      => 'Close',
+        ],
+        'actions' => array_map(function($row){
+            return [
+                'id'          => (string)($row['id'] ?? ''),
+                'label'       => (string)($row['label'] ?? ''),
+                'user_prompt' => (string)($row['user_prompt'] ?? ''),
+                'model'       => (string)($row['model'] ?? ''),
+            ];
+        }, $buttons),
+    ]);
 }
 add_action('wp_enqueue_scripts', 'fvqa_enqueue_front');
 
@@ -86,7 +116,7 @@ function fvqa_render_widget() {
             $label = esc_html($row['label'] ?? '');
             $id    = esc_attr($row['id'] ?? '');
             if ($label==='' || $id==='') continue;
-            $make_audio = !empty($row['make_audio']) || (stripos($label, 'audio') !== false);
+            $make_audio = !empty($row['audio']) || !empty($row['make_audio']) || (stripos($label, 'audio') !== false);
             $data_audio_attr = $make_audio ? ' data-audio="1"' : '';
         ?>
           <button type="button" class="fvqa-action-btn" data-id="<?php echo $id; ?>"<?php echo $data_audio_attr; ?>>
@@ -98,10 +128,10 @@ function fvqa_render_widget() {
 
       <div class="fvqa-body">
         <div class="fvqa-messages" aria-live="polite"></div>
-        <div class="fvqa-thinking" hidden>thinking…</div>
+        <div class="fvqa-thinking" hidden><?php echo esc_html($opt['thinking_text'] ?? 'Thinking…'); ?></div>
         <div class="fvqa-input">
           <textarea class="fvqa-text" placeholder="Ask about this lecture (e.g., “what happens at 12:15?”)"></textarea>
-          <button class="fvqa-send" type="button">Send</button>
+          <button class="fvqa-send" type="button"><?php echo esc_html__('Send','farhat-qa'); ?></button>
         </div>
       </div>
     </div>
